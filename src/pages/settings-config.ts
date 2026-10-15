@@ -1,8 +1,15 @@
-import { LLM_REFINE, TRANSLATION } from '@electron/shared/constants'
-import { normalizeLLMRefineConfig, resolveLLMConnection } from '@electron/shared/llm-config'
-import type { AppConfig, LLMRefineConfig } from '@electron/shared/types'
+import { LLM_REFINE, TRANSLATION } from '@/shared/constants'
+import { normalizeLLMRefineConfig, resolveLLMConnection } from '@/shared/llm-config'
+import type { AppConfig, LLMRefineConfig } from '@/shared/types'
 
-const LLM_CONNECTION_KEYS = ['openai', 'deepseek', 'openrouter', 'tokendance', 'custom'] as const
+const LLM_CONNECTION_KEYS = [
+  'openai',
+  'deepseek',
+  'openrouter',
+  'tokendance',
+  'mimo',
+  'custom',
+] as const
 
 export type RefineFeatureFlags = {
   enabled: boolean
@@ -200,6 +207,7 @@ export function applyPersistedSecretState(
       deepseek: { ...llmRefine.deepseek },
       openrouter: { ...llmRefine.openrouter },
       tokendance: { ...llmRefine.tokendance },
+      mimo: { ...llmRefine.mimo },
       custom: { ...llmRefine.custom },
     }
 
@@ -211,8 +219,19 @@ export function applyPersistedSecretState(
     llmRefine = normalizeLLMRefineConfig(nextLLMRefine)
   }
 
+  // Mirror the masked state of the MiMo ASR key only when the renderer value still matches what
+  // was sent, so edits made while the save was in flight are never overwritten.
+  let asr = currentConfig.asr
+  if (savedPatch.asr) {
+    const savedMimoApiKey = savedPatch.asr.mimoApiKey ?? ''
+    if ((currentConfig.asr?.mimoApiKey ?? '') === savedMimoApiKey) {
+      asr = { ...currentConfig.asr, mimoApiKey: persistedConfig.asr?.mimoApiKey ?? '' }
+    }
+  }
+
   return {
     ...currentConfig,
     llmRefine,
+    asr,
   }
 }

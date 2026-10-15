@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { LLM_PROVIDERS, LLM_REFINE, STORED_SECRET_PLACEHOLDER } from '@electron/shared/constants'
-import { defaultLLMRefineConfig, normalizeLLMRefineConfig } from '@electron/shared/llm-config'
-import type { AppConfig } from '@electron/shared/types'
+import { LLM_PROVIDERS, LLM_REFINE, STORED_SECRET_PLACEHOLDER } from '@/shared/constants'
+import {
+  defaultLLMRefineConfig,
+  normalizeLLMRefineConfig,
+  resolveLLMConnection,
+} from '@/shared/llm-config'
+import type { AppConfig } from '@/shared/types'
 import {
   applyPersistedSecretState,
   getRefineConnectionFingerprint,
@@ -159,6 +163,71 @@ describe('settings persisted secret state', () => {
     expect(result.llmRefine.provider).toBe('openai')
     expect(result.llmRefine.openai.apiKey).toBe(STORED_SECRET_PLACEHOLDER)
   })
+
+  it('masks a saved MiMo ASR key when the renderer value still matches what was sent', () => {
+    const current = createConfig('')
+    current.asr.mimoApiKey = 'asr-key'
+    const persisted = createConfig('')
+    persisted.asr.mimoApiKey = STORED_SECRET_PLACEHOLDER
+
+    const result = applyPersistedSecretState(current, { asr: current.asr }, persisted)
+
+    expect(result.asr.mimoApiKey).toBe(STORED_SECRET_PLACEHOLDER)
+  })
+
+  it('keeps a MiMo ASR key edited again while the save was in flight', () => {
+    const saved = createConfig('')
+    saved.asr.mimoApiKey = 'first-asr-key'
+    const current = createConfig('')
+    current.asr.mimoApiKey = 'second-asr-key'
+    const persisted = createConfig('')
+    persisted.asr.mimoApiKey = STORED_SECRET_PLACEHOLDER
+
+    const result = applyPersistedSecretState(current, { asr: saved.asr }, persisted)
+
+    expect(result.asr.mimoApiKey).toBe('second-asr-key')
+  })
+})
+
+describe('MiMo connection resolution and normalization', () => {
+  it('resolves the active connection from the mimo provider fields', () => {
+    const config = normalizeLLMRefineConfig({
+      ...defaultLLMRefineConfig,
+      provider: 'mimo',
+      mimo: {
+        apiKey: 'mimo-key',
+        model: 'mimo-v2.5',
+        endpoint: 'https://api.xiaomimimo.com/v1',
+      },
+    })
+
+    expect(resolveLLMConnection(config)).toEqual({
+      provider: 'mimo',
+      endpoint: 'https://api.xiaomimimo.com/v1',
+      model: 'mimo-v2.5',
+      apiKey: 'mimo-key',
+    })
+  })
+
+  it('preserves mimo fields across normalization instead of resetting to defaults', () => {
+    const normalized = normalizeLLMRefineConfig({
+      ...defaultLLMRefineConfig,
+      provider: 'mimo',
+      mimo: {
+        apiKey: 'mimo-key',
+        model: 'mimo-v2.5-asr',
+        endpoint: 'https://custom.example.com/v1',
+      },
+    })
+
+    expect(normalized.mimo).toEqual({
+      apiKey: 'mimo-key',
+      model: 'mimo-v2.5-asr',
+      endpoint: 'https://custom.example.com/v1',
+    })
+    // A stable round-trip is what keeps isLlmRefineDirty from reporting phantom changes.
+    expect(normalizeLLMRefineConfig(normalized).mimo).toEqual(normalized.mimo)
+  })
 })
 
 describe('refinement configuration completeness', () => {
@@ -309,7 +378,7 @@ describe('reconcileRefineFeaturesAfterConnectionChange', () => {
     expect(result.snapshot).toEqual(existingSnapshot)
   })
 
-  it('covers the reported round-trip: openrouter on → incomplete deepseek → openrouter on', () => {
+  it('covers the reported round-trip: openrouter on 鈫?incomplete deepseek 鈫?openrouter on', () => {
     const openrouterOn = createOpenRouterConfig({
       enabled: true,
       translateOutput: false,

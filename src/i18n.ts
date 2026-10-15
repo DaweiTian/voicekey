@@ -1,7 +1,7 @@
 import i18n from 'i18next'
 import { initReactI18next } from 'react-i18next'
-import { DEFAULT_LANGUAGE, resolveLanguage, resources } from '@electron/shared/i18n'
-import type { LanguageSnapshot } from '@electron/shared/types'
+import { DEFAULT_LANGUAGE, resolveLanguage, resources } from '@/shared/i18n'
+import type { LanguageSnapshot } from '@/shared/types'
 
 export const initI18n = async (): Promise<void> => {
   let snapshot: LanguageSnapshot | null = null

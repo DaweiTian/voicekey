@@ -1,0 +1,405 @@
+import { LLM_PROVIDERS, LLM_REFINE } from './constants'
+import { normalizeRefineBaseUrl } from './refine-url'
+import type {
+  CustomCompatibleLLMConfig,
+  DeepSeekConfig,
+  LLMProvider,
+  LLMRefineConfig,
+  OpenAIConfig,
+  OpenRouterConfig,
+  OpenRouterModel,
+  TokenDanceConfig,
+  MimoConfig,
+} from './types'
+
+export interface ResolvedLLMConnection {
+  provider: LLMProvider
+  endpoint: string
+  apiKey: string
+  model: string
+}
+
+const DEFAULT_DEEPSEEK_CONFIG: DeepSeekConfig = {
+  apiKey: LLM_REFINE.API_KEY,
+  model: LLM_PROVIDERS.DEFAULT_DEEPSEEK_MODEL,
+}
+
+const DEFAULT_OPENAI_CONFIG: OpenAIConfig = {
+  apiKey: LLM_REFINE.API_KEY,
+  model: LLM_PROVIDERS.DEFAULT_OPENAI_MODEL,
+}
+
+const DEFAULT_OPENROUTER_CONFIG: OpenRouterConfig = {
+  apiKey: LLM_REFINE.API_KEY,
+  model: LLM_PROVIDERS.DEFAULT_OPENROUTER_MODEL,
+}
+
+const DEFAULT_TOKENDANCE_CONFIG: TokenDanceConfig = {
+  apiKey: LLM_REFINE.API_KEY,
+  model: LLM_PROVIDERS.DEFAULT_TOKENDANCE_MODEL,
+}
+
+const DEFAULT_MIMO_CONFIG: MimoConfig = {
+  apiKey: LLM_REFINE.API_KEY,
+  model: 'mimo-v2.5',
+  endpoint: 'https://api.xiaomimimo.com/v1',
+}
+
+const DEFAULT_CUSTOM_CONFIG: CustomCompatibleLLMConfig = {
+  endpoint: LLM_REFINE.ENDPOINT,
+  model: LLM_REFINE.MODEL,
+  apiKey: LLM_REFINE.API_KEY,
+}
+
+export const defaultLLMRefineConfig: LLMRefineConfig = {
+  enabled: LLM_REFINE.ENABLED,
+  provider: LLM_REFINE.PROVIDER,
+  endpoint: LLM_PROVIDERS.DEEPSEEK_ENDPOINT,
+  model: DEFAULT_DEEPSEEK_CONFIG.model,
+  apiKey: LLM_REFINE.API_KEY,
+  translateOutput: LLM_REFINE.TRANSLATE_OUTPUT,
+  openai: DEFAULT_OPENAI_CONFIG,
+  deepseek: DEFAULT_DEEPSEEK_CONFIG,
+  openrouter: DEFAULT_OPENROUTER_CONFIG,
+  tokendance: DEFAULT_TOKENDANCE_CONFIG,
+  mimo: DEFAULT_MIMO_CONFIG,
+  custom: DEFAULT_CUSTOM_CONFIG,
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function readString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback
+}
+
+function readBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback
+}
+
+function readTranslateOutputFlag(config?: Record<string, unknown>): boolean {
+  if (!config) {
+    return defaultLLMRefineConfig.translateOutput
+  }
+
+  if (typeof config.translateOutput === 'boolean') {
+    return config.translateOutput
+  }
+
+  if (typeof config.translateToEnglish === 'boolean') {
+    return config.translateToEnglish
+  }
+
+  if (typeof config.translateChineseToEnglish === 'boolean') {
+    return config.translateChineseToEnglish
+  }
+
+  return defaultLLMRefineConfig.translateOutput
+}
+
+function normalizeProvider(value: unknown, rawConfig?: Record<string, unknown>): LLMProvider {
+  if (
+    value === 'openai' ||
+    value === 'deepseek' ||
+    value === 'openrouter' ||
+    value === 'tokendance' ||
+    value === 'mimo' ||
+    value === 'custom-compatible'
+  ) {
+    return value
+  }
+
+  const endpoint = normalizeRefineBaseUrl(readString(rawConfig?.endpoint))
+  const lowerEndpoint = endpoint.toLowerCase()
+
+  if (lowerEndpoint.includes('api.openai.com')) {
+    return 'openai'
+  }
+
+  if (lowerEndpoint.includes('api.deepseek.com')) {
+    return 'deepseek'
+  }
+
+  if (lowerEndpoint.includes('openrouter.ai')) {
+    return 'openrouter'
+  }
+
+  if (lowerEndpoint.includes('tokendance.space')) {
+    return 'tokendance'
+  }
+  if (lowerEndpoint.includes('xiaomimimo.com') || lowerEndpoint.includes('mimo.mi.com')) {
+    return 'mimo'
+  }
+
+  if (endpoint || readString(rawConfig?.model) || readString(rawConfig?.apiKey)) {
+    return 'custom-compatible'
+  }
+
+  return LLM_REFINE.PROVIDER
+}
+
+function normalizeOpenAIModel(value: unknown): OpenAIConfig['model'] {
+  const model = readString(value).trim()
+  return model === LLM_PROVIDERS.DEFAULT_OPENAI_MODEL ? model : LLM_PROVIDERS.DEFAULT_OPENAI_MODEL
+}
+
+function normalizeDeepSeekModel(value: unknown): DeepSeekConfig['model'] {
+  const model = readString(value).trim()
+  return LLM_PROVIDERS.DEEPSEEK_MODELS.includes(
+    model as (typeof LLM_PROVIDERS.DEEPSEEK_MODELS)[number],
+  )
+    ? (model as DeepSeekConfig['model'])
+    : LLM_PROVIDERS.DEFAULT_DEEPSEEK_MODEL
+}
+
+function isBuiltInOpenRouterModel(model: string): model is OpenRouterModel {
+  return LLM_PROVIDERS.OPENROUTER_MODELS.some((option) => option.id === model)
+}
+
+function normalizeOpenRouterModel(value: unknown): OpenRouterModel {
+  const model = readString(value).trim()
+  if (model === 'deepseek/deepseek-v4-flash-0731') {
+    return 'deepseek/deepseek-v4.1-flash'
+  }
+  return isBuiltInOpenRouterModel(model) ? model : LLM_PROVIDERS.DEFAULT_OPENROUTER_MODEL
+}
+
+function isBuiltInTokenDanceModel(model: string): model is TokenDanceConfig['model'] {
+  return LLM_PROVIDERS.TOKENDANCE_MODELS.some((option) => option.id === model)
+}
+
+function normalizeTokenDanceModel(value: unknown): TokenDanceConfig['model'] {
+  const model = readString(value).trim()
+  return isBuiltInTokenDanceModel(model) ? model : LLM_PROVIDERS.DEFAULT_TOKENDANCE_MODEL
+}
+
+function normalizeDeepSeekConfig(
+  value: unknown,
+  rawConfig: Record<string, unknown> | undefined,
+  provider: LLMProvider,
+): DeepSeekConfig {
+  const raw = isRecord(value) ? value : undefined
+  const legacyModel = provider === 'deepseek' ? rawConfig?.model : undefined
+  const legacyApiKey = provider === 'deepseek' ? rawConfig?.apiKey : undefined
+
+  return {
+    apiKey: readString(raw?.apiKey, readString(legacyApiKey, DEFAULT_DEEPSEEK_CONFIG.apiKey)),
+    model: normalizeDeepSeekModel(raw?.model ?? legacyModel ?? DEFAULT_DEEPSEEK_CONFIG.model),
+  }
+}
+
+function normalizeOpenAIConfig(
+  value: unknown,
+  rawConfig: Record<string, unknown> | undefined,
+  provider: LLMProvider,
+): OpenAIConfig {
+  const raw = isRecord(value) ? value : undefined
+  const legacyModel = provider === 'openai' ? rawConfig?.model : undefined
+  const legacyApiKey = provider === 'openai' ? rawConfig?.apiKey : undefined
+
+  return {
+    apiKey: readString(raw?.apiKey, readString(legacyApiKey, DEFAULT_OPENAI_CONFIG.apiKey)),
+    model: normalizeOpenAIModel(raw?.model ?? legacyModel),
+  }
+}
+
+function normalizeOpenRouterConfig(
+  value: unknown,
+  rawConfig: Record<string, unknown> | undefined,
+  provider: LLMProvider,
+): OpenRouterConfig {
+  const raw = isRecord(value) ? value : undefined
+  const legacyModel = provider === 'openrouter' ? rawConfig?.model : undefined
+  const legacyApiKey = provider === 'openrouter' ? rawConfig?.apiKey : undefined
+
+  return {
+    apiKey: readString(raw?.apiKey, readString(legacyApiKey, DEFAULT_OPENROUTER_CONFIG.apiKey)),
+    model: normalizeOpenRouterModel(raw?.model ?? legacyModel),
+  }
+}
+
+function normalizeTokenDanceConfig(
+  value: unknown,
+  rawConfig: Record<string, unknown> | undefined,
+  provider: LLMProvider,
+): TokenDanceConfig {
+  const raw = isRecord(value) ? value : undefined
+  const legacyModel = provider === 'tokendance' ? rawConfig?.model : undefined
+  const legacyApiKey = provider === 'tokendance' ? rawConfig?.apiKey : undefined
+
+  return {
+    apiKey: readString(raw?.apiKey, readString(legacyApiKey, DEFAULT_TOKENDANCE_CONFIG.apiKey)),
+    model: normalizeTokenDanceModel(raw?.model ?? legacyModel ?? DEFAULT_TOKENDANCE_CONFIG.model),
+  }
+}
+
+function normalizeCustomConfig(
+  value: unknown,
+  rawConfig: Record<string, unknown> | undefined,
+  provider: LLMProvider,
+): CustomCompatibleLLMConfig {
+  const raw = isRecord(value) ? value : undefined
+  const legacyEndpoint = provider === 'custom-compatible' ? rawConfig?.endpoint : undefined
+  const legacyModel = provider === 'custom-compatible' ? rawConfig?.model : undefined
+  const legacyApiKey = provider === 'custom-compatible' ? rawConfig?.apiKey : undefined
+
+  return {
+    endpoint: normalizeRefineBaseUrl(
+      readString(raw?.endpoint, readString(legacyEndpoint, DEFAULT_CUSTOM_CONFIG.endpoint)),
+    ),
+    model: readString(raw?.model, readString(legacyModel, DEFAULT_CUSTOM_CONFIG.model)),
+    apiKey: readString(raw?.apiKey, readString(legacyApiKey, DEFAULT_CUSTOM_CONFIG.apiKey)),
+  }
+}
+
+function normalizeMimoConfig(
+  value: unknown,
+  rawConfig: Record<string, unknown> | undefined,
+  provider: LLMProvider,
+): MimoConfig {
+  const raw = isRecord(value) ? value : undefined
+  const legacyModel = provider === 'mimo' ? rawConfig?.model : undefined
+  const legacyApiKey = provider === 'mimo' ? rawConfig?.apiKey : undefined
+  const legacyEndpoint = provider === 'mimo' ? rawConfig?.endpoint : undefined
+
+  return {
+    apiKey: readString(raw?.apiKey, readString(legacyApiKey, DEFAULT_MIMO_CONFIG.apiKey)),
+    model: readString(raw?.model, readString(legacyModel, DEFAULT_MIMO_CONFIG.model)),
+    endpoint: readString(raw?.endpoint, readString(legacyEndpoint, DEFAULT_MIMO_CONFIG.endpoint)),
+  }
+}
+
+export function resolveLLMConnection(config: LLMRefineConfig): ResolvedLLMConnection {
+  if (config.provider === 'openai') {
+    return {
+      provider: 'openai',
+      endpoint: LLM_PROVIDERS.OPENAI_ENDPOINT,
+      model: config.openai.model,
+      apiKey: config.openai.apiKey,
+    }
+  }
+
+  if (config.provider === 'deepseek') {
+    return {
+      provider: 'deepseek',
+      endpoint: LLM_PROVIDERS.DEEPSEEK_ENDPOINT,
+      model: config.deepseek.model,
+      apiKey: config.deepseek.apiKey,
+    }
+  }
+
+  if (config.provider === 'openrouter') {
+    return {
+      provider: 'openrouter',
+      endpoint: LLM_PROVIDERS.OPENROUTER_ENDPOINT,
+      model: config.openrouter.model,
+      apiKey: config.openrouter.apiKey,
+    }
+  }
+
+  if (config.provider === 'tokendance') {
+    return {
+      provider: 'tokendance',
+      endpoint: LLM_PROVIDERS.TOKENDANCE_ENDPOINT,
+      model: config.tokendance.model,
+      apiKey: config.tokendance.apiKey,
+    }
+  }
+
+  if (config.provider === 'mimo') {
+    return {
+      provider: 'mimo',
+      endpoint: config.mimo.endpoint,
+      model: config.mimo.model,
+      apiKey: config.mimo.apiKey,
+    }
+  }
+
+  return {
+    provider: 'custom-compatible',
+    endpoint: config.custom.endpoint,
+    model: config.custom.model,
+    apiKey: config.custom.apiKey,
+  }
+}
+
+export function normalizeLLMRefineConfig(config?: Partial<LLMRefineConfig>): LLMRefineConfig {
+  const rawConfig =
+    config && typeof config === 'object'
+      ? (config as Partial<LLMRefineConfig> & Record<string, unknown>)
+      : undefined
+  const provider = normalizeProvider(rawConfig?.provider, rawConfig)
+  const openai = normalizeOpenAIConfig(rawConfig?.openai, rawConfig, provider)
+  const deepseek = normalizeDeepSeekConfig(rawConfig?.deepseek, rawConfig, provider)
+  const openrouter = normalizeOpenRouterConfig(rawConfig?.openrouter, rawConfig, provider)
+  const tokendance = normalizeTokenDanceConfig(rawConfig?.tokendance, rawConfig, provider)
+  const mimo = normalizeMimoConfig(rawConfig?.mimo, rawConfig, provider)
+  const custom = normalizeCustomConfig(rawConfig?.custom, rawConfig, provider)
+  const activeConnection = resolveLLMConnection({
+    ...defaultLLMRefineConfig,
+    provider,
+    openai,
+    deepseek,
+    openrouter,
+    tokendance,
+    mimo,
+    custom,
+  })
+
+  return {
+    ...defaultLLMRefineConfig,
+    enabled: readBoolean(rawConfig?.enabled, defaultLLMRefineConfig.enabled),
+    provider,
+    endpoint: activeConnection.endpoint,
+    model: activeConnection.model,
+    apiKey: activeConnection.apiKey,
+    translateOutput: readTranslateOutputFlag(rawConfig),
+    openai,
+    deepseek,
+    openrouter,
+    tokendance,
+    mimo,
+    custom,
+  }
+}
+
+/**
+ * Per-request app attribution headers. TokenDance attributes calls via the
+ * X-App-URL request header, which overrides any App URL stored on the API key.
+ */
+export function buildLLMAttributionHeaders(
+  connection: ResolvedLLMConnection,
+): Record<string, string> {
+  if (connection.provider === 'tokendance') {
+    return { 'X-App-URL': LLM_PROVIDERS.TOKENDANCE_APP_URL }
+  }
+
+  return {}
+}
+
+/**
+ * Keep provider-specific switches explicit so reasoning-capable models cannot
+ * silently spend time on hidden thinking during refinement or translation.
+ */
+export function buildDisabledReasoningPayloadFields(
+  connection: ResolvedLLMConnection,
+): Record<string, unknown> {
+  if (connection.provider === 'openai') {
+    return { reasoning_effort: 'none' }
+  }
+
+  if (connection.provider === 'deepseek') {
+    return { thinking: { type: 'disabled' } }
+  }
+
+  if (connection.provider === 'openrouter') {
+    return { reasoning: { enabled: false, exclude: true } }
+  }
+
+  if (connection.provider === 'tokendance' && connection.model === 'deepseek-v4.1-flash') {
+    return { thinking: { type: 'disabled' } }
+  }
+
+  return {}
+}

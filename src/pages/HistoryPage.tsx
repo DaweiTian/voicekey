@@ -11,8 +11,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { HISTORY_RETENTION_DAYS } from '@electron/shared/constants'
-import { getLocale } from '@electron/shared/i18n'
+import { HISTORY_RETENTION_DAYS } from '@/shared/constants'
+import { getLocale } from '@/shared/i18n'
 import { cn } from '@/lib/utils'
 import { VoiceWave } from '@/components/VoiceWave'
 import { countCharacters, type HistoryItem } from '@/lib/stats'
@@ -273,7 +273,7 @@ export default function HistoryPage() {
 
   return (
     <div className="mx-auto max-w-[1040px] px-8 py-7">
-      {/* 页头 */}
+      {/* 椤靛ご */}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-primary">
@@ -346,7 +346,7 @@ export default function HistoryPage() {
         </div>
       ) : (
         <div className="mt-6 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_332px]">
-          {/* 列表 */}
+          {/* 鍒楄〃 */}
           <div className="flex flex-col gap-5">
             {visibleGroups.map((group) => (
               <div key={group.label}>
@@ -385,7 +385,7 @@ export default function HistoryPage() {
             ))}
           </div>
 
-          {/* 详情 */}
+          {/* 璇︽儏 */}
           <DetailPane
             item={selected}
             formatNumber={formatNumber}
@@ -551,7 +551,7 @@ function DetailPane({
           {formatTime(item.timestamp)}
         </div>
         <div className="mt-0.5 text-xs text-muted-foreground">
-          {dateLabel} · {weekday}
+          {dateLabel} 路 {weekday}
         </div>
       </div>
       <div className="vk-scroll overflow-y-auto px-5 py-4">

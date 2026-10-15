@@ -23,7 +23,7 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { type LanguageSetting } from '@electron/shared/i18n'
+import { type LanguageSetting } from '@/shared/i18n'
 import {
   LOG_FILE_MAX_SIZE_MB,
   LOG_RETENTION_DAYS,
@@ -32,14 +32,14 @@ import {
   STORED_SECRET_PLACEHOLDER,
   TRANSLATION,
   TARGET_LANGUAGES,
-} from '@electron/shared/constants'
-import { formatHostMemoryGiB } from '@electron/shared/host-capabilities'
-import { normalizeRefineBaseUrl } from '@electron/shared/refine-url'
+} from '@/shared/constants'
+import { formatHostMemoryGiB } from '@/shared/host-capabilities'
+import { normalizeRefineBaseUrl } from '@/shared/refine-url'
 import {
   defaultLLMRefineConfig,
   normalizeLLMRefineConfig,
   resolveLLMConnection,
-} from '@electron/shared/llm-config'
+} from '@/shared/llm-config'
 import type {
   AppConfig,
   ASRMode,
@@ -52,7 +52,7 @@ import type {
   LinuxIntegrationStatus,
   TranslationConfig,
   UpdateInfo,
-} from '@electron/shared/types'
+} from '@/shared/types'
 import { LogViewerDialog } from '@/components/LogViewerDialog'
 import { HotkeySettings } from '@/components/HotkeySettings'
 import { Alert, AlertDescription } from '@/components/ui/alert'
@@ -116,7 +116,13 @@ function isAsrConfigDirty(current: AppConfig['asr'], original: AppConfig['asr'])
     (current.lowVolumeMode ?? true) !== (original.lowVolumeMode ?? true) ||
     (current.streamingEnabled ?? false) !== (original.streamingEnabled ?? false) ||
     (current.microphoneDeviceId ?? '') !== (original.microphoneDeviceId ?? '') ||
-    (current.microphoneDeviceLabel ?? '') !== (original.microphoneDeviceLabel ?? '')
+    (current.microphoneDeviceLabel ?? '') !== (original.microphoneDeviceLabel ?? '') ||
+    (current.engine ?? 'mimo') !== (original.engine ?? 'mimo') ||
+    (current.mimoEndpoint ?? '') !== (original.mimoEndpoint ?? '') ||
+    (current.mimoModel ?? '') !== (original.mimoModel ?? '') ||
+    // A stored key is masked as the placeholder in both snapshots, so equal placeholders mean the
+    // key was left untouched; any other difference (including clearing or a new key) is a change.
+    (current.mimoApiKey ?? '') !== (original.mimoApiKey ?? '')
   )
 }
 
@@ -140,6 +146,21 @@ function isTranslationConfigDirty(
   original: TranslationConfig,
 ): boolean {
   return current.enabled !== original.enabled || current.targetLanguage !== original.targetLanguage
+}
+
+/**
+ * A stored API key is shown as a selectable placeholder. If the user inserts text without
+ * replacing the whole selection (paste/mid-string caret), the placeholder plus the new text would
+ * otherwise be saved as the key. Strip the placeholder characters so only the fresh input remains.
+ */
+function stripStoredSecretPlaceholder(nextValue: string, previousValue: string): string {
+  if (
+    previousValue === STORED_SECRET_PLACEHOLDER &&
+    nextValue.includes(STORED_SECRET_PLACEHOLDER)
+  ) {
+    return nextValue.split(STORED_SECRET_PLACEHOLDER).join('')
+  }
+  return nextValue
 }
 
 function mergeConfigPatch(config: AppConfig, patch: Partial<AppConfig>): AppConfig {
@@ -887,11 +908,13 @@ export default function SettingsPage() {
     }
 
     if (asrDirty) {
-      patch.asr = currentConfig.asr
+      // Send the complete ASR object (original fields + edits) so the Rust merge cannot fall back
+      // to defaults for fields the renderer does not include, and stored-masked keys survive.
+      patch.asr = { ...currentOriginalConfig.asr, ...currentConfig.asr }
     }
 
     if (refineDirty && !refineError) {
-      patch.llmRefine = normalizedRefineConfig
+      patch.llmRefine = { ...currentOriginalConfig.llmRefine, ...normalizedRefineConfig }
     }
 
     if (hotkeyDirty && !hotkeyError) {
@@ -1599,6 +1622,27 @@ export default function SettingsPage() {
     }))
   }
 
+  const handleMimoConfigChange = (key: 'endpoint' | 'model' | 'apiKey', value: string) => {
+    disableRefineDependentFeatures()
+    if (key === 'apiKey') {
+      setVisibleSecret((current) =>
+        current?.id === 'llm-refine:mimo' ? { id: current.id } : current,
+      )
+    }
+    setConfig((prev) => ({
+      ...prev,
+      llmRefine: {
+        ...prev.llmRefine,
+        mimo: {
+          model: prev.llmRefine.mimo?.model ?? 'mimo-v2.5',
+          apiKey: prev.llmRefine.mimo?.apiKey ?? '',
+          endpoint: prev.llmRefine.mimo?.endpoint ?? 'https://api.xiaomimimo.com/v1',
+          [key]: value,
+        },
+      },
+    }))
+  }
+
   const handleSecretVisibilityToggle = async (
     request: ConfigSecretRequest,
     secretId: string,
@@ -1724,6 +1768,7 @@ export default function SettingsPage() {
   const isCustomLLMProvider = currentLLMProvider === 'custom-compatible'
   const builtInDeepSeekModels: string[] = [...LLM_PROVIDERS.DEEPSEEK_MODELS]
   const llmProviderOptions = [
+    { value: 'mimo', label: 'MiMo' },
     { value: 'deepseek', label: 'DeepSeek' },
     { value: 'tokendance', label: 'TokenDance' },
     { value: 'openai', label: 'OpenAI' },
@@ -2003,60 +2048,178 @@ export default function SettingsPage() {
             </div>
 
             <div className="mt-4 space-y-3">
-              <ModelCard
-                icon={<HardDrive className="h-4 w-4" />}
-                title={t('settings.localAsr.title')}
-                desc={t('settings.localAsr.help')}
-                ready={localAsrReady}
-                readyLabel={t('settings.localAsr.ready')}
-                downloading={downloadingLocalAsr}
-                progressLabel={localAsrProgressLabel}
-                progressPercent={localAsrProgressPercent}
-                deleting={deletingLocalAsr}
-                downloadDisabled={!localAsrSupported || downloadingLocalAsr}
-                downloadLabel={t('settings.localAsr.download')}
-                downloadingLabel={t('settings.localAsr.downloading')}
-                onDownload={handleDownloadLocalASR}
-                onDelete={handleDeleteLocalASR}
-                deleteLabel={t('settings.modelStorage.delete')}
-                deletingLabel={t('settings.modelStorage.deleting')}
-                supported={localAsrSupported}
-                unsupportedText={t('settings.localAsr.unsupported')}
-                selected={!streamingEnabled}
-                enableLabel={t('settings.modelStorage.enable')}
-                selectedLabel={t('settings.modelStorage.selected')}
-                onSelect={() => handleSelectASRMode('classic')}
-                onOpenDirectory={() => void handleOpenASRModelDirectory('classic')}
-                openDirectoryLabel={t('settings.modelStorage.open')}
-              />
+              <div className="space-y-2">
+                <Label>{t('settings.asrEngine')}</Label>
+                <Segmented
+                  value={(config.asr.engine ?? 'mimo') === 'local' ? 'local' : 'mimo'}
+                  onChange={(value) => {
+                    const engine = value === 'local' ? 'local' : 'mimo'
+                    setConfig((prev) => ({
+                      ...prev,
+                      asr: { ...prev.asr, engine },
+                    }))
+                  }}
+                  options={[
+                    { value: 'mimo', label: t('settings.asrEngineMimo') },
+                    { value: 'local', label: t('settings.asrEngineLocal') },
+                  ]}
+                />
+                <p className="text-xs text-muted-foreground">{t('settings.asrEngineHelp')}</p>
+              </div>
 
-              <ModelCard
-                icon={<Activity className="h-4 w-4" />}
-                title={t('settings.streamingAsr.title')}
-                desc={t('settings.streamingAsr.help')}
-                ready={streamingAsrReady}
-                readyLabel={t('settings.streamingAsr.ready')}
-                downloading={downloadingStreamingAsr}
-                progressLabel={streamingAsrProgressLabel}
-                progressPercent={streamingAsrProgressPercent}
-                deleting={deletingStreamingAsr}
-                downloadDisabled={!streamingAsrSupported || downloadingStreamingAsr}
-                downloadLabel={t('settings.streamingAsr.download')}
-                downloadingLabel={t('settings.streamingAsr.downloading')}
-                onDownload={handleDownloadStreamingASR}
-                onDelete={handleDeleteStreamingASR}
-                deleteLabel={t('settings.modelStorage.delete')}
-                deletingLabel={t('settings.modelStorage.deleting')}
-                supported={streamingAsrSupported}
-                unsupportedText={t('settings.streamingAsr.unsupported')}
-                selected={streamingEnabled}
-                enableLabel={t('settings.modelStorage.enable')}
-                selectedLabel={t('settings.modelStorage.selected')}
-                onSelect={() => handleSelectASRMode('streaming')}
-                onOpenDirectory={() => void handleOpenASRModelDirectory('streaming')}
-                openDirectoryLabel={t('settings.modelStorage.open')}
-              />
+              {(config.asr.engine ?? 'mimo') === 'mimo' && (
+                <div className="space-y-4 rounded-lg border border-border/60 p-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="asrMimoEndpoint">
+                      {t('settings.refineEndpoint')} <span className="text-primary">*</span>
+                    </Label>
+                    <Input
+                      id="asrMimoEndpoint"
+                      type="text"
+                      value={config.asr.mimoEndpoint ?? ''}
+                      onChange={(e) =>
+                        setConfig((prev) => ({
+                          ...prev,
+                          asr: { ...prev.asr, mimoEndpoint: e.target.value },
+                        }))
+                      }
+                      placeholder="https://api.xiaomimimo.com/v1"
+                      className="no-drag font-mono"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      {t('settings.asrMimoEndpointHelp')}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="asrMimoModel">{t('settings.refineModel')}</Label>
+                    <Input
+                      id="asrMimoModel"
+                      type="text"
+                      value={config.asr.mimoModel ?? 'mimo-v2.5-asr'}
+                      onChange={(e) =>
+                        setConfig((prev) => ({
+                          ...prev,
+                          asr: { ...prev.asr, mimoModel: e.target.value },
+                        }))
+                      }
+                      placeholder="mimo-v2.5-asr"
+                      className="no-drag font-mono"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="asrMimoApiKey">
+                      {t('settings.refineApiKey')} <span className="text-primary">*</span>
+                    </Label>
+                    <div className="relative">
+                      <Input
+                        id="asrMimoApiKey"
+                        type={visibleSecret?.id === 'asr:mimo' ? 'text' : 'password'}
+                        value={
+                          visibleSecret?.id === 'asr:mimo'
+                            ? (visibleSecret.value ?? config.asr.mimoApiKey ?? '')
+                            : (config.asr.mimoApiKey ?? '')
+                        }
+                        onChange={(e) => {
+                          const nextValue = stripStoredSecretPlaceholder(
+                            e.target.value,
+                            config.asr.mimoApiKey ?? '',
+                          )
+                          setVisibleSecret((current) =>
+                            current?.id === 'asr:mimo' ? { id: current.id } : current,
+                          )
+                          setConfig((prev) => ({
+                            ...prev,
+                            asr: { ...prev.asr, mimoApiKey: nextValue },
+                          }))
+                        }}
+                        placeholder={t('settings.asrMimoApiKeyPlaceholder')}
+                        className="no-drag pr-10 font-mono"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void handleSecretVisibilityToggle(
+                            { scope: 'asr', provider: 'mimo' },
+                            'asr:mimo',
+                            config.asr.mimoApiKey ?? '',
+                          )
+                        }
+                        disabled={revealingSecretId === 'asr:mimo'}
+                        aria-label={t('settings.showRefineKey')}
+                        className="no-drag absolute inset-y-0 right-0 flex items-center pr-3 text-muted-foreground hover:text-foreground"
+                      >
+                        {visibleSecret?.id === 'asr:mimo' ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {t('settings.asrMimoApiKeyHelp')}
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
+
+            {(config.asr.engine ?? 'mimo') === 'local' && (
+              <div className="mt-4 space-y-3">
+                <ModelCard
+                  icon={<HardDrive className="h-4 w-4" />}
+                  title={t('settings.localAsr.title')}
+                  desc={t('settings.localAsr.help')}
+                  ready={localAsrReady}
+                  readyLabel={t('settings.localAsr.ready')}
+                  downloading={downloadingLocalAsr}
+                  progressLabel={localAsrProgressLabel}
+                  progressPercent={localAsrProgressPercent}
+                  deleting={deletingLocalAsr}
+                  downloadDisabled={!localAsrSupported || downloadingLocalAsr}
+                  downloadLabel={t('settings.localAsr.download')}
+                  downloadingLabel={t('settings.localAsr.downloading')}
+                  onDownload={handleDownloadLocalASR}
+                  onDelete={handleDeleteLocalASR}
+                  deleteLabel={t('settings.modelStorage.delete')}
+                  deletingLabel={t('settings.modelStorage.deleting')}
+                  supported={localAsrSupported}
+                  unsupportedText={t('settings.localAsr.unsupported')}
+                  selected={!streamingEnabled}
+                  enableLabel={t('settings.modelStorage.enable')}
+                  selectedLabel={t('settings.modelStorage.selected')}
+                  onSelect={() => handleSelectASRMode('classic')}
+                  onOpenDirectory={() => void handleOpenASRModelDirectory('classic')}
+                  openDirectoryLabel={t('settings.modelStorage.open')}
+                />
+
+                <ModelCard
+                  icon={<Activity className="h-4 w-4" />}
+                  title={t('settings.streamingAsr.title')}
+                  desc={t('settings.streamingAsr.help')}
+                  ready={streamingAsrReady}
+                  readyLabel={t('settings.streamingAsr.ready')}
+                  downloading={downloadingStreamingAsr}
+                  progressLabel={streamingAsrProgressLabel}
+                  progressPercent={streamingAsrProgressPercent}
+                  deleting={deletingStreamingAsr}
+                  downloadDisabled={!streamingAsrSupported || downloadingStreamingAsr}
+                  downloadLabel={t('settings.streamingAsr.download')}
+                  downloadingLabel={t('settings.streamingAsr.downloading')}
+                  onDownload={handleDownloadStreamingASR}
+                  onDelete={handleDeleteStreamingASR}
+                  deleteLabel={t('settings.modelStorage.delete')}
+                  deletingLabel={t('settings.modelStorage.deleting')}
+                  supported={streamingAsrSupported}
+                  unsupportedText={t('settings.streamingAsr.unsupported')}
+                  selected={streamingEnabled}
+                  enableLabel={t('settings.modelStorage.enable')}
+                  selectedLabel={t('settings.modelStorage.selected')}
+                  onSelect={() => handleSelectASRMode('streaming')}
+                  onOpenDirectory={() => void handleOpenASRModelDirectory('streaming')}
+                  openDirectoryLabel={t('settings.modelStorage.open')}
+                />
+              </div>
+            )}
 
             <InlineFeedback status={asrTestStatus} testId="asr-test-status" />
 
@@ -2100,6 +2263,42 @@ export default function SettingsPage() {
                 {t('settings.llmProviderHelp', { endpoint: activeLLMConnection.endpoint })}
               </p>
             </div>
+
+            {currentLLMProvider === 'mimo' && (
+              <div className="mt-4 space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="mimoEndpoint">
+                    {t('settings.refineEndpoint')} <span className="text-primary">*</span>
+                  </Label>
+                  <Input
+                    id="mimoEndpoint"
+                    type="text"
+                    value={
+                      normalizedLLMRefineConfig.mimo?.endpoint ?? 'https://api.xiaomimimo.com/v1'
+                    }
+                    onChange={(e) => handleMimoConfigChange('endpoint', e.target.value)}
+                    placeholder="https://api.xiaomimimo.com/v1"
+                    className="no-drag font-mono"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="mimoModel">
+                    {t('settings.refineModel')} <span className="text-primary">*</span>
+                  </Label>
+                  <Input
+                    id="mimoModel"
+                    value={normalizedLLMRefineConfig.mimo?.model ?? 'mimo-v2.5'}
+                    onChange={(e) => handleMimoConfigChange('model', e.target.value)}
+                    placeholder="mimo-v2.5"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.mimoModelHelp', {
+                      url: 'https://mimo.mi.com/docs/zh-CN/quick-start/summary/model',
+                    })}
+                  </p>
+                </div>
+              </div>
+            )}
 
             {currentLLMProvider === 'openai' && (
               <div className="mt-4 space-y-4">
@@ -2260,16 +2459,22 @@ export default function SettingsPage() {
                   type={isRefineApiKeyVisible ? 'text' : 'password'}
                   value={displayedRefineApiKey}
                   onChange={(e) => {
+                    const nextValue = stripStoredSecretPlaceholder(
+                      e.target.value,
+                      displayedRefineApiKey,
+                    )
                     if (currentLLMProvider === 'openai') {
-                      handleOpenAIApiKeyChange(e.target.value)
+                      handleOpenAIApiKeyChange(nextValue)
                     } else if (currentLLMProvider === 'deepseek') {
-                      handleDeepSeekApiKeyChange(e.target.value)
+                      handleDeepSeekApiKeyChange(nextValue)
                     } else if (currentLLMProvider === 'openrouter') {
-                      handleOpenRouterApiKeyChange(e.target.value)
+                      handleOpenRouterApiKeyChange(nextValue)
                     } else if (currentLLMProvider === 'tokendance') {
-                      handleTokenDanceApiKeyChange(e.target.value)
+                      handleTokenDanceApiKeyChange(nextValue)
+                    } else if (currentLLMProvider === 'mimo') {
+                      handleMimoConfigChange('apiKey', nextValue)
                     } else {
-                      handleCustomConfigChange('apiKey', e.target.value)
+                      handleCustomConfigChange('apiKey', nextValue)
                     }
                   }}
                   onFocus={(event) => {

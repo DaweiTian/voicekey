@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AudioLines, Check, Globe, Mic, Sparkles, X, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { OverlayProcessingStage, OverlayState } from '../../electron/shared/types'
+import type { OverlayProcessingStage, OverlayState } from '@/shared/types'
 import { cn } from '../lib/utils'
 import { Waveform } from './Waveform'
 
@@ -190,7 +190,7 @@ export function HUD() {
           border: '1px solid transparent',
         }}
         onMouseEnter={() => window.electronAPI.setIgnoreMouseEvents(false)}
-        onMouseLeave={() => window.electronAPI.setIgnoreMouseEvents(true, { forward: true })}
+        onMouseLeave={() => window.electronAPI.setIgnoreMouseEvents(true)}
       >
         {/* Left status icon */}
         <div className="relative mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center">

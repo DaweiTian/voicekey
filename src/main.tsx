@@ -1,11 +1,14 @@
-﻿import React from 'react'
+import React from 'react'
 import ReactDOM from 'react-dom/client'
+import { SessionNotifications } from '@/components/SessionNotifications'
 import { Toaster } from '@/components/ui/sonner'
 import { initRendererLogger } from '@/lib/logger'
+import { installTauriApi, tauriApi } from '@/lib/tauri-api'
 import App from './App.tsx'
 import i18n, { initI18n } from './i18n'
 import './index.css'
 
+installTauriApi()
 initRendererLogger()
 
 const root = ReactDOM.createRoot(document.getElementById('root')!)
@@ -18,24 +21,16 @@ initI18n()
     root.render(
       <React.StrictMode>
         <App />
+        <SessionNotifications />
         <Toaster />
       </React.StrictMode>,
     )
 
-    if (window.electronAPI?.onAppLanguageChanged) {
-      window.electronAPI.onAppLanguageChanged((snapshot) => {
-        void i18n.changeLanguage(snapshot.resolved)
-        if (typeof document !== 'undefined') {
-          document.documentElement.lang = snapshot.resolved
-        }
-      })
-    }
+    tauriApi.onAppLanguageChanged((snapshot) => {
+      const resolved = (snapshot as { resolved?: string }).resolved
+      if (resolved) {
+        void i18n.changeLanguage(resolved)
+        document.documentElement.lang = resolved
+      }
+    })
   })
-
-// Use contextBridge
-// Guard ipcRenderer access to support browser preview/dev mode
-if (window.ipcRenderer) {
-  window.ipcRenderer.on('main-process-message', (_event, message) => {
-    console.log(message)
-  })
-}

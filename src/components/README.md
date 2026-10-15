@@ -32,6 +32,10 @@ React 组件目录，包含应用级组件与 `ui/` 组件库。
 
 玻璃拟态录音状态浮窗组件：渐变描边 + 随状态变色的环境辉光，麦克风图标随音量呼吸缩放并带涟漪光环。流式模式边说边显示 X-ASR 实时文本（尾部未稳定字符弱化显示 + 流光光标），非流式（SenseVoice）以大波形为主视觉；停止后用 X-ASR final text 替换 partial，并显示识别、润色或翻译阶段。
 
+### `SessionNotifications.tsx`
+
+主窗口录音反馈监听组件（渲染 `null`）：订阅主进程 `error` / `transcription` / `session-status` 事件并用 sonner toast 呈现——错误与转写结果必报，`recording`/`processing` 等瞬态状态跳过以免刷屏；仅在 main 窗口挂载（overlay/background 窗口不响应）。
+
 ### `HotkeyRecorder.tsx`
 
 快捷键录制组件，用于设置页录制和校验快捷键。
@@ -63,3 +67,12 @@ React 组件目录，包含应用级组件与 `ui/` 组件库。
 ### `InteractiveCharts.tsx`
 
 首页趋势图组件，聚合历史记录并绘制字符识别趋势，含 7/30/90 天分段切换。
+
+### `TitleBar.tsx`
+
+自定义窗口标题栏组件，提供：
+
+- 品牌区（小 Logo + 应用名）
+- 可拖拽区域（`data-tauri-drag-region`，双击最大化/还原）
+- 最小化 / 最大化（还原） / 关闭按钮
+- macOS 兼容（左侧留出交通灯空间，控制按钮保持右侧与 Windows 一致）

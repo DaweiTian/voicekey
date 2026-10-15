@@ -10,11 +10,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import {
-  LOG_FILE_MAX_SIZE_MB,
-  LOG_RETENTION_DAYS,
-  LOG_TAIL_MAX_BYTES,
-} from '@electron/shared/constants'
+import { LOG_FILE_MAX_SIZE_MB, LOG_RETENTION_DAYS, LOG_TAIL_MAX_BYTES } from '@/shared/constants'
 
 interface LogViewerDialogProps {
   open: boolean

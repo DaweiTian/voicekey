@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 快捷键工具函数
  * 用于处理 Electron Accelerator 格式的快捷键
  */
@@ -24,11 +24,89 @@ export const RESERVED_HOTKEYS = [
   'Control+Tab',
 ]
 
-export type HotkeyValidationMessage = 'missing' | 'conflict' | 'multiple' | 'modifierOnly'
+export type HotkeyValidationMessage =
+  | 'missing'
+  | 'conflict'
+  | 'multiple'
+  | 'modifierOnly'
+  | 'unsupported'
 
 export interface HotkeyValidationOptions {
   /** PTT 按住说话支持单修饰键（如 Alt）；其他快捷键必须包含主键 */
   allowModifierOnly?: boolean
+}
+
+/** Modifier tokens accepted in an Accelerator, including the cross-platform alias. */
+const MODIFIER_KEYS = ['Command', 'Control', 'Alt', 'Shift', 'CommandOrControl']
+
+/** Named (non-character) main keys supported by the Rust hotkey parser. */
+const NAMED_HOTKEY_KEYS = new Set([
+  'Space',
+  'Enter',
+  'Tab',
+  'Backspace',
+  'Delete',
+  'Insert',
+  'Up',
+  'Down',
+  'Left',
+  'Right',
+  'Home',
+  'End',
+  'PageUp',
+  'PageDown',
+  'Comma',
+  'Period',
+  'Slash',
+  'Semicolon',
+  'Quote',
+  'BracketLeft',
+  'BracketRight',
+  'Backslash',
+  'Minus',
+  'Equal',
+  'Backquote',
+])
+
+/** Raw punctuation characters map back to the canonical tokens above. */
+const PUNCTUATION_TO_TOKEN: Record<string, string> = {
+  ',': 'Comma',
+  '.': 'Period',
+  '/': 'Slash',
+  ';': 'Semicolon',
+  "'": 'Quote',
+  '[': 'BracketLeft',
+  ']': 'BracketRight',
+  '\\': 'Backslash',
+  '-': 'Minus',
+  '=': 'Equal',
+  '`': 'Backquote',
+}
+
+/** Physical-key `code` → canonical token, so Shift variants resolve to the base key. */
+const CODE_TO_TOKEN: Record<string, string> = {
+  Comma: 'Comma',
+  Period: 'Period',
+  Slash: 'Slash',
+  Semicolon: 'Semicolon',
+  Quote: 'Quote',
+  BracketLeft: 'BracketLeft',
+  BracketRight: 'BracketRight',
+  Backslash: 'Backslash',
+  Minus: 'Minus',
+  Equal: 'Equal',
+  Backquote: 'Backquote',
+}
+
+/**
+ * Whether a non-modifier token is one the Rust parser understands. Kept in sync with
+ * `hotkey.rs` so the recorder can flag unsupported keys instead of failing silently.
+ */
+export function isSupportedHotkeyKey(key: string): boolean {
+  if (/^[A-Z0-9]$/.test(key)) return true
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(key)) return true
+  if (NAMED_HOTKEY_KEYS.has(key)) return true
+  return key in PUNCTUATION_TO_TOKEN
 }
 
 /**
@@ -59,33 +137,22 @@ export function normalizeKey(e: KeyboardEvent): string | null {
   if (key === 'PageUp') return 'PageUp'
   if (key === 'PageDown') return 'PageDown'
 
-  // F 键
-  if (/^F\d+$/.test(key)) return key
+  // F 键（仅 F1-F24 与 Rust 解析器一致）
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(key)) return key
 
   // 字母和数字
   if (/^[a-zA-Z0-9]$/.test(key)) return key.toUpperCase()
 
-  // 标点符号 - 使用 code 获取更准确的键名
+  // 标点符号 - 优先按物理键 code 归类，保证 Shift 变体也落到基础键
+  if (CODE_TO_TOKEN[code]) return CODE_TO_TOKEN[code]
   if (code.startsWith('Key')) return code.slice(3)
   if (code.startsWith('Digit')) return code.slice(5)
 
   // 其他可用键
-  const symbolMap: Record<string, string> = {
-    ',': 'Comma',
-    '.': 'Period',
-    '/': 'Slash',
-    ';': 'Semicolon',
-    "'": 'Quote',
-    '[': 'BracketLeft',
-    ']': 'BracketRight',
-    '\\': 'Backslash',
-    '-': 'Minus',
-    '=': 'Equal',
-    '`': 'Backquote',
-  }
-  if (symbolMap[key]) return symbolMap[key]
+  if (PUNCTUATION_TO_TOKEN[key]) return PUNCTUATION_TO_TOKEN[key]
 
-  return key.length === 1 ? key : null
+  // 未识别的键：返回原始 key 让上层校验给出明确提示，而不是静默丢弃
+  return key || null
 }
 
 /**
@@ -162,8 +229,7 @@ export function validateHotkey(
 
   // 新增：检查非修饰键数量
   const parts = accelerator.split('+')
-  const modifiers = ['Command', 'Control', 'Alt', 'Shift']
-  const nonModifiers = parts.filter((p) => !modifiers.includes(p))
+  const nonModifiers = parts.filter((p) => !MODIFIER_KEYS.includes(p))
 
   if (nonModifiers.length > 1) {
     return { valid: false, messageKey: 'multiple' }
@@ -171,6 +237,10 @@ export function validateHotkey(
 
   if (!allowModifierOnly && nonModifiers.length === 0) {
     return { valid: false, messageKey: 'modifierOnly' }
+  }
+
+  if (nonModifiers.some((key) => !isSupportedHotkeyKey(key))) {
+    return { valid: false, messageKey: 'unsupported' }
   }
 
   return { valid: true }

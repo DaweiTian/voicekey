@@ -1,8 +1,8 @@
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { getLocale } from '@electron/shared/i18n'
+import { getLocale } from '@/shared/i18n'
 
-/** 统一的数字 / 时长 / 峰值日格式化，供主页与统计组件共用。 */
+/** 缁熶竴鐨勬暟瀛?/ 鏃堕暱 / 宄板€兼棩鏍煎紡鍖栵紝渚涗富椤典笌缁熻缁勪欢鍏辩敤銆?*/
 export function useStatFormatters() {
   const { t, i18n } = useTranslation()
   const locale = getLocale(i18n.language)

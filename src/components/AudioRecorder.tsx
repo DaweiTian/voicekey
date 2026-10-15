@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
-import { LOW_VOLUME_GAIN_DB, RECORDING } from '@electron/shared/constants'
-import type { ASRMode, RecordingStartPayload } from '@electron/shared/types'
+import { LOW_VOLUME_GAIN_DB, RECORDING } from '@/shared/constants'
+import type { ASRMode, RecordingStartPayload } from '@/shared/types'
 
 type StopMeta = {
   chunkIndex: number

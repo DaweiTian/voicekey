@@ -3,8 +3,8 @@ import {
   LOG_MESSAGE_MAX_LENGTH,
   LOG_STACK_HEAD_LINES,
   LOG_STACK_TAIL_LINES,
-} from '@electron/shared/constants'
-import type { LogEntryPayload, LogLevel } from '@electron/shared/types'
+} from '@/shared/constants'
+import type { LogEntryPayload, LogLevel } from '@/shared/types'
 
 const MAX_MESSAGE_LENGTH = LOG_MESSAGE_MAX_LENGTH
 const MAX_DATA_LENGTH = LOG_DATA_MAX_LENGTH
