@@ -165,6 +165,16 @@ export default tseslint.config(
   },
 
   // ============================================
+  // 6b. 本地辅助脚本（CommonJS）
+  // ============================================
+  {
+    files: ['scripts/**/*.cjs'],
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
+
+  // ============================================
   // 7. Prettier 配置（必须放在最后！）
   // ============================================
 
@@ -190,6 +200,8 @@ export default tseslint.config(
     ignores: [
       // 构建输出
       'dist/',
+      'src-tauri/target/',
+      'src-tauri/gen/',
       'dist-electron/',
       'build/',
 

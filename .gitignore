@@ -41,3 +41,7 @@ website/dist/
 designs/
 skills-lock.json
 systemprompt.txt
+
+# Tauri / Rust build output
+src-tauri/target/
+src-tauri/gen/
