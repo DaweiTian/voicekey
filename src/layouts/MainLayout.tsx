@@ -3,6 +3,7 @@ import { Home, Settings, History, Sun, Moon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/lib/useTheme'
+import TitleBar from '@/components/TitleBar'
 
 interface MainLayoutProps {
   children: ReactNode
@@ -31,7 +32,6 @@ export default function MainLayout({ children, currentRoute }: MainLayoutProps) 
   const navigate = (path: string) => {
     window.location.hash = path
   }
-  const isMac = window.electronAPI.platform === 'darwin'
 
   const navItems = [
     { path: '/home', label: t('nav.home'), icon: Home },
@@ -41,8 +41,8 @@ export default function MainLayout({ children, currentRoute }: MainLayoutProps) 
 
   return (
     <div className="flex h-screen flex-col bg-sidebar">
-      {/* 顶部拖拽区域（macOS 交通灯留白） */}
-      {isMac ? <div className="drag-region h-12 shrink-0 bg-sidebar" /> : null}
+      {/* 自定义标题栏，覆盖整个窗口顶部 */}
+      <TitleBar />
 
       <div className="flex flex-1 overflow-hidden">
         {/* 左侧栏 */}

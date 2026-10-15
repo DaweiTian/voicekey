@@ -1,0 +1,82 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Voice Key",
+  "version": "0.4.0",
+  "identifier": "com.buildwithais.voicekey",
+  "build": {
+    "beforeDevCommand": "npm run dev:vite",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build:vite",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Voice Key",
+        "width": 1100,
+        "height": 720,
+        "minWidth": 600,
+        "minHeight": 500,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "visible": true,
+        "decorations": false
+      },
+      {
+        "label": "overlay",
+        "title": "Voice Key HUD",
+        "width": 420,
+        "height": 160,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "visible": false,
+        "x": 40,
+        "y": 40
+      },
+      {
+        "label": "background",
+        "title": "Voice Key Recorder",
+        "width": 320,
+        "height": 240,
+        "resizable": false,
+        "decorations": false,
+        "visible": false,
+        "skipTaskbar": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
+    },
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true,
+      "tooltip": "Voice Key"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "nsis", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Push-to-talk voice input",
+    "longDescription": "Local-first push-to-talk voice input with optional LLM polish and translation."
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}

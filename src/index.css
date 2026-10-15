@@ -194,16 +194,15 @@ html.vk-theme-changing *::after {
   transition-delay: 0s !important;
 }
 
-/* macOS 风格窗口支持 */
-.drag-region {
-  -webkit-app-region: drag;
-}
-
+/* Tauri v2 使用 data-tauri-drag-region 属性识别拖拽区；
+   以下类仅作兼容性占位，避免大量引用 .no-drag 的文件报错。 */
+.drag-region,
 .no-drag {
-  -webkit-app-region: no-drag;
+  /* 保留类名，功能已由 data-tauri-drag-region 与按钮区域的 DOM 结构承担。 */
+  pointer-events: auto;
 }
 
-/* 为交通灯按钮留出空间 */
+/* 为交通灯按钮留出空间（保留供未来需要时使用） */
 .macos-titlebar-space {
   padding-top: env(titlebar-area-height, 52px);
 }
