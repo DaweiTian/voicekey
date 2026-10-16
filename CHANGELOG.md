@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.0] - 2026-10-16
+
+本版本一并补记 0.4.0 未写入 changelog 的 Tauri 迁移主线，以及本轮桌面可靠性修复。
+
+### Features
+
+- 桌面后端从 Electron 迁移到 Tauri 2（Rust 主进程 + 系统 WebView），常驻内存显著下降
+- **window:** 自定义标题栏与无装饰窗口（主窗口关闭系统装饰，由前端自绘标题栏与边框）
+- **asr:** Rust 主进程重建流式转写链路（X-ASR，0.3.0 首次引入），并简化本地模型选择流程
+- **overlay:** 悬浮胶囊常驻待机，鼠标按住点击即可说话，托盘可显隐（默认开启）
+- **hotkey:** 支持鼠标中键触发录音（设置中可开关，默认关闭，仅 Windows）
+- **stats:** 首页累计统计独立持久化（`voice-key-stats.json`），删除或清理历史不再清空累计数据，存量用户首次启动自动回填
+- **translate:** 选中文字快捷键翻译落地（选区捕获 → LLM 翻译 → 原位回贴，剪贴板自动恢复）
+
+### Bug Fixes
+
+- **ui:** 消除 Windows 11 下 HUD 胶囊与主界面的系统蓝色焦点边框
+- **hotkey:** 设置界面录入快捷键不再误触发录音（应用内聚焦或录制态自动屏蔽）
+- **hotkey:** 修复右 Alt（AltGr）设置时报错并反复弹窗的问题（左右修饰键区分、非法值一次性提示并自动回滚）
+- **window:** 主界面最小化到托盘 5 分钟后自动释放 WebView 进程，重开自动恢复（显著降低后台内存占用）
+- **deps:** 补回缺失的 `axios` 依赖，修复测试套件加载失败
+
+### Performance
+
+- **overlay:** HUD 窗口随内容自适应缩放，消除胶囊四周的点击死区
+- **stats:** 统计读-改-写全程持进程级锁，并发累加不再丢更新
+- **session:** 代码审查加固——转写/润色期间拒绝重复启动、中键只停止自己启动的会话、剪贴板不可读时不覆写用户内容
+
 ## [0.3.0](https://github.com/BuildWithAIs/voicekey/compare/v0.2.1...v0.3.0) (2026-09-01)
 
 ### Features
