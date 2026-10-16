@@ -105,7 +105,7 @@ overlay 窗口的紧凑状态胶囊（无边框透明窗口，由主进程定位
 
 ### `BrandMark.tsx`
 
-芷若 (Zhiruo) 品牌标记：兰草叶片 + 声波弧的单色 SVG（`currentColor` 着色），与 `src-tauri/icons-src/icon.svg` 主图标造型一致。被 `TitleBar` 与 `MainLayout` 侧栏品牌区共用；改造型时两处同时生效。
+芷若 (Zhiruo) 品牌标记：兰草叶片 + 声波弧的单色 SVG（`currentColor` 着色），与 `src-tauri/icons-src/icon.svg` 主图标造型一致。被 `TitleBar` 品牌区使用；改造型时标题栏同步生效。
 
 ### `TitleBar.tsx`
 

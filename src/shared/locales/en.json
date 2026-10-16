@@ -27,7 +27,9 @@
   "nav": {
     "home": "Home",
     "settings": "Settings",
-    "history": "History"
+    "history": "History",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar"
   },
   "common": {
     "loading": "Loading...",

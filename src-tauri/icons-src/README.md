@@ -27,3 +27,6 @@ node src-tauri/icons-src/render-og.cjs .
 
 `src-tauri/icons/` 为生成产物，不建议手工编辑；改动图标请改 `icon.svg` 后重新生成。
 托盘图标取自 `app.default_window_icon()`，会自动跟随这里生成的图标。
+NSIS 安装器/卸载器图标在 `tauri.conf.json` 的 `bundle.windows.nsis.installerIcon` /
+`uninstallerIcon` 显式指向 `icons/icon.ico`（不设置时 makensis 回退 NSIS 自带默认图标，
+`bundle.icon` 首项不会被安装器采用），重新生成图标后该 ico 会一并更新、配置无需改动。

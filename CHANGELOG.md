@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.5](https://github.com/BuildWithAIs/voicekey/compare/v0.5.4...v0.5.5) (2026-10-16)
+
+### Features
+
+- **ui:** 侧边栏支持折叠——侧栏右缘垂直中部贴边箭头按钮（展开朝左/折叠朝右），220px↔24px 平滑过渡，折叠态经本地存储持久化、重启还原
+- **bundle:** NSIS 安装器与卸载器图标显式配置为应用图标（此前 bundler 不采信 bundle.icon，安装包显示 NSIS 默认图标）
+
+### Bug Fixes
+
+- **ui:** 删除主界面侧栏顶部与标题栏重复的应用名品牌块（BrandMark+「芷若」+slogan），仅保留自绘 TitleBar 中的标题
+
 ## [0.5.4](https://github.com/BuildWithAIs/voicekey/compare/v0.5.3...v0.5.4) (2026-10-16)
 
 ### Features
