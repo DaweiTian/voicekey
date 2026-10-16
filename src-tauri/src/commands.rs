@@ -489,6 +489,32 @@ async fn wait_for_flush(state: &AppState, timeout_ms: u64) {
 /// toast, mouse.rs rule) from a real failure that must reset the state machine.
 const ERR_NOT_RECORDING: &str = "当前没有正在进行的录音。";
 
+/// Below this captured-session length (ms), a session that recorded no audio at
+/// all is treated as a mis-tap / quick click and settles silently — no error
+/// toast, empty transcript, straight back to idle (product decision: 误触/快速
+/// 点击静默不报错).
+///
+/// Why 250ms: `getUserMedia` typically needs ~100-200ms to hand over the first
+/// audio frames, so a press-release shorter than that can reach the stop path
+/// before anything was ever capturable — that is not a microphone failure and
+/// must not alarm the user. A session that long (or longer) with zero samples
+/// means the mic really produced nothing, so the original "没有录到声音" error
+/// stays.
+const EMPTY_SESSION_QUIET_MS: u64 = 250;
+
+/// Pure decision for a session that ended with no audio: whether it settles
+/// quietly (empty transcript, back to idle) instead of reporting
+/// "没有录到声音，请检查麦克风后重试。". `has_audio` is true when any PCM or
+/// classic chunk was captured.
+///
+/// Product decision (0.5.x): a mis-tap or very quick click runs the full
+/// start → stop chain before the microphone stream is ready; that must be
+/// silent, while a real hold ([`EMPTY_SESSION_QUIET_MS`] or longer) that
+/// captured nothing keeps the microphone-failure error.
+fn empty_session_is_quiet(elapsed_ms: u64, has_audio: bool) -> bool {
+    !has_audio && elapsed_ms < EMPTY_SESSION_QUIET_MS
+}
+
 /// Shared finalize path used by the stop command and PTT release.
 ///
 /// Wraps the fallible work so that *every* failure path (empty key, non-2xx
@@ -514,13 +540,19 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
     // invalidates middle-button ownership before the session state changes.
     crate::mouse::clear_owned_session();
 
-    {
+    // Session length at the moment the stop is claimed, before `wait_for_flush`
+    // can add up to 1200ms: the empty-session quiet decision must see the real
+    // press → release duration, not duration + flush latency. A clock that
+    // moved backwards reads as "just started" (saturating_sub), which at worst
+    // turns a rare error toast into silence — the product decision's bias.
+    let session_elapsed_ms = {
         let mut session = state.session.lock().map_err(|e| e.to_string())?;
         if session.status != SessionStatus::Recording {
             return Err(ERR_NOT_RECORDING.into());
         }
         session.status = SessionStatus::Processing;
-    }
+        now_ms().saturating_sub(session.started_at)
+    };
 
     // Ask the recorder window to stop and flush a final PCM/chunk marker.
     let session_id = {
@@ -623,6 +655,22 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
             all
         };
         if chunks.is_empty() {
+            // Mis-tap / quick click: session ended before the mic produced
+            // anything (`has_audio` false by construction here — PCM was empty
+            // and no classic chunks arrived). Per product decision such short
+            // sessions settle silently back to idle: complete with an empty
+            // transcript, skip the `error` / `transcription` events (a toast
+            // would defeat "不弹错误") and the success flash alike.
+            if empty_session_is_quiet(session_elapsed_ms, false) {
+                {
+                    let mut session = state.session.lock().map_err(|e| e.to_string())?;
+                    session.complete(String::new());
+                }
+                overlay_emit_idle(app);
+                return Ok(String::new());
+            }
+            // A real hold that captured nothing is a microphone failure: keep
+            // the original error so the user can act on it.
             return Err("没有录到声音，请检查麦克风后重试。".into());
         }
         // If the recorder sent wav/webm chunks, try cloud ASR on the first non-empty one
@@ -1339,4 +1387,33 @@ pub async fn translate_text(
 ) -> Result<String, String> {
     let config = state.config.load();
     llm::translate_text(&text, &target_language, &config.llm_refine).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mis-tap / quick click: shorter than `EMPTY_SESSION_QUIET_MS` with
+    /// nothing captured settles quietly (product decision: never an error).
+    #[test]
+    fn empty_session_short_without_audio_is_quiet() {
+        assert!(empty_session_is_quiet(0, false));
+        assert!(empty_session_is_quiet(EMPTY_SESSION_QUIET_MS - 1, false));
+    }
+
+    /// A real hold that captured nothing is a microphone failure: the original
+    /// "没有录到声音" error must stay.
+    #[test]
+    fn empty_session_long_without_audio_reports_error() {
+        assert!(!empty_session_is_quiet(EMPTY_SESSION_QUIET_MS, false));
+        assert!(!empty_session_is_quiet(5_000, false));
+    }
+
+    /// Any captured audio follows the normal transcription path regardless of
+    /// duration — a short utterance is still a real dictation.
+    #[test]
+    fn session_with_audio_is_never_quieted_by_duration() {
+        assert!(!empty_session_is_quiet(0, true));
+        assert!(!empty_session_is_quiet(5_000, true));
+    }
 }

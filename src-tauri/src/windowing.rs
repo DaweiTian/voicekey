@@ -6,8 +6,13 @@
 //!    around an activated borderless window. The HUD overlay must never get one
 //!    (`WS_EX_NOACTIVATE` + `DWMWA_BORDER_COLOR=NONE`), while the main window
 //!    only loses the system border (`DWMWA_BORDER_COLOR=NONE`) and stays
-//!    focusable. Every helper is idempotent so it can be re-applied on each
-//!    show without side effects.
+//!    focusable. The overlay *additionally* has its native caption / sizing-frame
+//!    window bits stripped (see [`strip_native_frame`]): tao builds every window
+//!    with `WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` and only
+//!    hides them by collapsing the client area - a hidden trap that makes Windows
+//!    paint a native titlebar (minimize / restore / close buttons + a frame line
+//!    above the capsule) once any non-client area exists. Every helper is
+//!    idempotent so it can be re-applied on each show without side effects.
 //! 2. **Main window hide-to-tray lifecycle.** Closing the main window hides it
 //!    to the tray and arms a [`MAIN_DESTROY_DELAY`] timer that destroys the
 //!    whole main WebView process to reclaim memory. Reopening (tray menu /
@@ -133,13 +138,77 @@ fn prevent_activation<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     }
 }
 
-/// Full hardening for the HUD overlay: it must never activate and never draw
-/// the system focus frame. Idempotent; call before *and* after every show so a
-/// missed setup pass or a style reset can never leave a visible frame.
+/// Remove the native caption / sizing-frame bits from the overlay window.
+///
+/// Why this exists: tao builds *every* window - decorated or not - with
+/// `WS_CAPTION | WS_SYSMENU` plus `WS_MINIMIZEBOX | WS_MAXIMIZEBOX`
+/// (minimizable / maximizable default to `true`; only `WS_SIZEBOX` follows
+/// `resizable`), then relies on its `WM_NCCALCSIZE` handler collapsing the client
+/// area to the whole window to keep them hidden. That only holds while the window
+/// has **no** non-client area. tao's own `calculate_insets_for_dpi` carries the
+/// warning verbatim: "if there is any nonclient area, Windows will draw a full
+/// native titlebar outside the client area" - and that titlebar carries exactly
+/// the minimize / restore / close buttons, plus the frame line above the client
+/// area, that the transparent capsule must never show.
+///
+/// The default `shadow: true` is what creates that non-client area on Windows
+/// (tao's `MARKER_UNDECORATED_SHADOW` path reserves frame-thickness insets around
+/// the client area). The `overlay` entry disables it via `"shadow": false`, but
+/// the caption bits are stripped here anyway so that *no* tao / DWM path can ever
+/// paint a native titlebar on the capsule. Idempotent: it early-returns once the
+/// bits are gone, so the per-show hardening pass stays free.
+///
+/// `SWP_FRAMECHANGED` is required to commit the change: without it Windows keeps
+/// the cached (decorated) non-client area and keeps painting the frame.
+#[cfg(target_os = "windows")]
+fn strip_native_frame<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_MAXIMIZEBOX,
+        WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let hwnd_ptr = hwnd.0;
+
+    // The caption, the system menu it renders from, and the sizing-frame bits
+    // that give a borderless window a native silhouette.
+    const NATIVE_FRAME: u32 =
+        WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd_ptr, GWL_STYLE) as u32;
+        let stripped = style & !NATIVE_FRAME;
+        if stripped == style {
+            return; // already clean: nothing to commit
+        }
+        SetWindowLongPtrW(hwnd_ptr, GWL_STYLE, stripped as isize);
+        // Dropping the style bits alone is not enough: ask Windows to recompute
+        // the non-client area and repaint the frame so the caption disappears now.
+        SetWindowPos(
+            hwnd_ptr,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Full hardening for the HUD overlay: it must never activate, never draw the
+/// system focus frame, and never show a native caption / frame (the three
+/// minimize / restore / close buttons plus the window border). Idempotent; call
+/// before *and* after every show so a missed setup pass or a style reset can
+/// never leave a visible frame.
 #[cfg(target_os = "windows")]
 pub fn harden_overlay_window<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     prevent_activation(window);
     suppress_focus_frame(window);
+    strip_native_frame(window);
 }
 
 /// Main-window hardening: strip only the DWM focus frame. The main window must
@@ -359,9 +428,12 @@ pub fn ensure_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<We
 }
 
 /// Rebuild the HUD overlay with the same shape as the `overlay` entry in
-/// `tauri.conf.json` (280x64, transparent, always-on-top, skip-taskbar, not
-/// initially focused, hidden until shown). Keep the two in sync when the
-/// config changes.
+/// `tauri.conf.json` (280x64, decorations off, **shadow off**, transparent,
+/// always-on-top, skip-taskbar, not initially focused, hidden until shown). Keep
+/// the two in sync when the config changes. `shadow(false)` matters: on Windows
+/// the default `true` gives an undecorated window a DWM frame (border + shadow +
+/// rounded corners) drawn in a non-client band around the capsule - the extra
+/// rectangle the capsule must not have.
 fn build_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
     let window = tauri::WebviewWindowBuilder::new(
         app,
@@ -372,6 +444,7 @@ fn build_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<
     .inner_size(280.0, 64.0)
     .resizable(false)
     .decorations(false)
+    .shadow(false)
     .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)

@@ -31,9 +31,9 @@ React 组件目录，包含应用级组件与 `ui/` 组件库。
 
 ### `HUD.tsx`
 
-overlay 窗口的紧凑状态胶囊（无边框透明窗口，由主进程定位到光标所在屏幕的工作区底部居中、任务栏上方约 48px 处；位置可被用户拖拽改变并由 Rust 持久化）。窗口尺寸随内容自适应：渲染层在每次状态 / 文案变化后于 `requestAnimationFrame` 中测量胶囊布局尺寸（外层无 transform 的测量容器 `getBoundingClientRect`，不受入场 / 按压缩放动画影响），经 `setOverlaySize`（Rust `set_overlay_size`，含尺寸合法性钳制）把窗口缩到内容大小 + 每侧 2px 内边距，因此不存在固定 280×64 矩形的不可见点击死区，整窗即可点击区域。鼠标事件语义：所有状态保持可点击（`set_ignore_mouse_events(false)`，不做穿透）——Tauri `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，hover 穿透会让 `mouseenter` 不再可达（取消按钮将永久点不到），故不做 hover 穿透切换。胶囊为常驻待机启动器：启动后一直显示，状态机 idle → recording → processing → success/error → 回 idle（会话结束不再隐藏，仅托盘「显示悬浮胶囊」可隐藏）。
+overlay 窗口的紧凑状态胶囊（无边框透明窗口，由主进程定位到光标所在屏幕的工作区底部居中、任务栏上方约 48px 处；位置可被用户拖拽改变并由 Rust 持久化）。窗口尺寸随内容自适应：渲染层在每次状态 / 文案变化后于 `requestAnimationFrame` 中测量胶囊布局尺寸（外层无 transform 的测量容器 `getBoundingClientRect`，不受入场 / 按压缩放动画影响），经 `setOverlaySize`（Rust `set_overlay_size`，含尺寸合法性钳制）把窗口缩到内容大小 + 每侧 2px 内边距，因此不存在固定 280×64 矩形的不可见点击死区。**按下热区挂在整窗容器上**（外层 `fixed inset-0` 的容器带 `pointer-events-auto` 并承载 `pointerdown` / `pointerup` / `pointercancel` / `dblclick` / `contextmenu`），待机胶囊 `<button>` 只作视觉主体：窗口尺寸与胶囊尺寸之间的任何留白、以及胶囊 `rounded-full` 的四角都不再是「点了没反应」的死区。鼠标事件语义：所有状态保持可点击（`set_ignore_mouse_events(false)`，不做穿透）——Tauri `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，hover 穿透会让 `mouseenter` 不再可达（取消按钮将永久点不到），故不做 hover 穿透切换。胶囊为常驻待机启动器：启动后一直显示，状态机 idle → recording → processing → success/error → 回 idle（会话结束不再隐藏，仅托盘「显示悬浮胶囊」可隐藏）。
 
-**待机态（idle）**：小尺寸低调胶囊（36px 高，小圆麦克风 + 「按住说话」）。点击语义 = 按住说话：左键 / 中键 `pointerdown` 开始录音，`pointerup` / `pointercancel` / `pointerleave` 结束并转写（与 PTT 心智一致，不做切换）。同时，待机胶囊支持**拖拽 reposition**：
+**待机态（idle）**：小尺寸低调胶囊（36px 高，小圆麦克风 + 「按住说话」）。点击语义 = 按住说话：左键 / 中键 `pointerdown` 开始录音，`pointerup` / `pointercancel` 结束并转写（与 PTT 心智一致，不做切换；热区为整个 overlay 窗口容器，见上）。同时，待机胶囊支持**拖拽 reposition**：
 
 - 采用**位移阈值**（`DRAG_THRESHOLD_PX = 8`）区分「按住说话」与「拖拽」：pointerdown 后若移动未超过阈值，按 PTT 处理；超过阈值即进入拖拽，若会话已开始则走 `cancelSession` 干净取消，不留悬挂会话。拖拽状态机已提取到 `src/lib/overlayDrag.ts` 纯函数模块，HUD.tsx 仅保留薄的命令执行层。
 - 由于 overlay 窗口标记为 `WS_EX_NOACTIVATE`，原生 `startDragging` 在某些平台可能无法捕获鼠标；因此采用**指针跟随 + `setPosition` 的自绘位移方案**，移动过程经 `requestAnimationFrame` 节流，释放后才调用 `setOverlayPosition` 持久化。
@@ -42,7 +42,8 @@ overlay 窗口的紧凑状态胶囊（无边框透明窗口，由主进程定位
 - **拖拽期间抑制 resize**：进入 dragging 后 `scheduleOverlayResize` 不再调用 `set_overlay_size`，避免 Rust 用持久化 `overlayPosition` 重新锚定导致窗口跳回旧点；释放后 flush 一次测量，文字增长等非拖拽 resize 不受影响。
 - 选择位移阈值而非专用抓取区，是为了不缩减 PTT 热区、不在胶囊上增加额外装饰，且与系统常见拖拽判定一致。
 - 拖拽释放后 Rust 会吸附到屏幕边缘；胶囊本身用 CSS `transition-[opacity,transform,filter]` 保持入场/按压缩放动效，吸附动画由窗口位置变化呈现。
-- **快速双击（双次轻点）待机胶囊**可重置位置：第一次轻点（按下时长低于 `TAP_MAX_MS`、位移几乎为 0）会被识别为 tap 并取消会话，不会触发“没有录到声音”等报错；第二次轻点后的 `dblclick` 调用 `setOverlayPosition(null, null)`，Rust 会恢复底部居中默认位。位移在拖拽阈值内但明显移动过的正常松开仍走 `stop-session`，因此正常长按不会被误判为重置。
+- **pointerup 一律走 `stop-session`（不再有「轻点即取消」）**：`pending` 状态下只要位移没超过 `DRAG_THRESHOLD_PX`，无论按住 100ms 还是 2s，松开都进入 start→stop 的正常转写链路。**回归陷阱**：0.5.1 曾把「时长 ≤ `TAP_MAX_MS`（200ms）且位移 ≤ `TAP_DISTANCE_PX`（4px）」的轻点判为 tap 并直接 `cancel-session`，导致一次普通单击（典型 60~150ms）永远被秒取消——胶囊闪一下、麦克风流还没拿到就被丢弃，表现为「完全无法录音」。**任何**回归都不得把首次轻点改回 `cancel-session`；超短录音（麦克风尚未出流、PCM 为空）由 Rust 侧统一处理，不在 renderer 用取消来回避。
+- **快速双击（双次轻点）待机胶囊**可重置位置：`lastTap` 在每次 `pointerup` 记录并**跨下一次 `pointerdown` 保留**（第二次按下的按下可能被 Rust 以 "Processing in progress" 静默拒绝，必须保留才能让 `dblclick` 复位生效），第二次轻点（`DOUBLE_CLICK_MAX_MS` 内、位移 ≤ `TAP_DISTANCE_PX`）才走 `cancel-session`（双击是「重置位置」手势，不应触发空录音报错），随后 `dblclick` 调用 `setOverlayPosition(null, null)`，Rust 恢复底部居中默认位。位移在拖拽阈值内但明显移动过（> `TAP_DISTANCE_PX`）的松开仍走 `stop-session`，正常长按同样走 `stop-session`，都不会被误判为重置。
 
 **录音 / 处理态**：268×52 深色玻璃胶囊 + 大圆角，状态只用左侧 28px 圆章的小面积色彩语义——录音为琥珀主色麦克风圆章（随音量呼吸 + 涟漪，无流式文本时右侧配迷你波形），处理为阶段色转圈包住阶段图标，成功为绿勾，错误为红叉；文字始终单行截断（`title` 提示全文），取消按钮仅在录音/处理态显示。录音 / 处理中的胶囊**保持固定不可拖**。流式识别时实时文本尾部弱化 + 流光光标（录音与转写处理中均显示，尾部切分按 Unicode 码点）；配色为固定深色方案，不依赖明暗主题。
 

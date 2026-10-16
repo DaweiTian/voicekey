@@ -467,8 +467,15 @@ export function HUD() {
   }
   executeDragCommandsRef.current = executeDragCommands
 
-  /** 待机胶囊 pointerdown：同时启动按住说话与拖拽监听。 */
-  const handleIdlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  /**
+   * 待机胶囊 pointerdown：同时启动按住说话与拖拽监听。
+   *
+   * 监听挂在**整个 overlay 窗口**的容器上（而不是只挂在胶囊 `<button>` 上）：窗口按
+   * 内容尺寸缩放后胶囊四周仍有不可见的窗口空白，且 `<button>` 的圆角本身也会让
+   * 四角不参与命中；只挂胶囊会让落在胶囊边缘/上下的按下「完全无反应」（0.5.1 回归
+   * 缺陷现象之一）。整窗即热区后，点在窗口内任意位置都能启动会话。
+   */
+  const handleIdlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     const [nextState, cmds] = onPointerDown(
       {
         button: event.button,
@@ -503,8 +510,9 @@ export function HUD() {
     }
   }
 
-  /** 待机胶囊双击：重置到默认底部居中位置。 */
+  /** 待机胶囊双击：重置到默认底部居中位置（仅待机态；录音 / 处理态不响应）。 */
   const handleIdleDoubleClick = () => {
+    if (statusRef.current !== 'idle') return
     const [nextState, cmds] = onDoubleClick(dragRef.current, Date.now())
     dragRef.current = nextState
     executeDragCommands(cmds)
@@ -525,14 +533,18 @@ export function HUD() {
 
   return (
     <div
-      className="pointer-events-none fixed inset-0 flex items-center justify-center"
+      className="pointer-events-auto fixed inset-0 flex items-center justify-center"
+      onPointerDown={handleIdlePointerDown}
       onPointerUp={handleHoldEnd}
       onPointerCancel={handleHoldEnd}
+      onDoubleClick={handleIdleDoubleClick}
+      onContextMenu={(event) => event.preventDefault()}
     >
       {/* 测量容器：无自身 transform，rect 恒等于胶囊布局尺寸，供窗口缩放 */}
       <div ref={measureRef} className="flex shrink-0">
         {status === 'idle' ? (
-          // 待机态：小尺寸低调胶囊，pointerdown = 按住说话 / 开始拖拽判定
+          // 待机态：小尺寸低调胶囊。仅作视觉主体，pointerdown / dblclick 等交互
+          // 统一挂在整窗容器上（见 handleIdlePointerDown 注释），避免只命中胶囊本体。
           <button
             type="button"
             className={cn(
@@ -544,12 +556,6 @@ export function HUD() {
                 ? 'translate-y-0 scale-100 opacity-100 blur-0'
                 : 'translate-y-2 scale-95 opacity-0 blur-sm',
             )}
-            onPointerDown={handleIdlePointerDown}
-            onPointerUp={handleHoldEnd}
-            onPointerCancel={handleHoldEnd}
-            onPointerLeave={handleHoldEnd}
-            onDoubleClick={handleIdleDoubleClick}
-            onContextMenu={(event) => event.preventDefault()}
             title={t('hud.holdToTalk')}
             aria-label={t('hud.holdToTalk')}
           >

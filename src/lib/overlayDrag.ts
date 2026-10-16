@@ -10,9 +10,18 @@ import type { OverlayStatus } from '@/shared/types'
  * 主要语义：
  * - 待机态 pointerdown 同时启动 PTT 会话并进入 pending，位移未超过阈值时视为按住说话。
  * - 位移超过 DRAG_THRESHOLD_PX 则进入 dragging，取消会话并开始跟随指针移动窗口。
- * - pointerup 时若仍在 pending 且时间/位移都很小（几乎未移动），视为一次 tap：取消会话
- *   （避免 ~0 音频报错），并记录 lastTap；快速连续两次 tap 触发 onDoubleClick 重置位置。
- *   位移在拖拽阈值内但明显移动过的正常松开仍走 stop-session。
+ * - pointerup 时仍在 pending（无论轻点还是长按，只要没有大幅移动）**一律走 stop-session**：
+ *   这正是「按住说话」的松开语义，也是普通单击能进入 start→stop 正常转写链路的前提。
+ *   REGRESSION WARNING（0.5.1 回归缺陷）：曾经把「时间 ≤ TAP_MAX_MS 且位移 ≤ TAP_DISTANCE_PX」
+ *   的轻点判为 tap 并直接 cancel-session，结果用户的一次普通单击（典型 60~150ms）永远被
+ *   秒取消——胶囊闪一下、麦克风还没拿到流就被丢弃（渲染层日志 "Session ended while
+ *   acquiring microphone, discarding stream"），「完全无法录音」。不要再把首次轻点
+ *   改成 cancel-session。
+ * - 仅当一次轻点是**双击手势的第二次**（DOUBLE_CLICK_MAX_MS 内、且位移仍 ≤ TAP_DISTANCE_PX
+ *   的前一次轻点之后）才走 cancel-session：双击复位是"重置位置"手势，不应触发
+ *   空录音报错；随后浏览器 dblclick 调用 onDoubleClick 复位。
+ *   为此 onPointerDown 不再清空 lastTap（第二次按下的按下可能被 Rust 以
+ *   "Processing in progress" 静默拒绝，必须保留上一次 lastTap 才能让 dblclick 复位生效）。
  * - 拖拽期间抑制 setOverlaySize，防止窗口跳回持久化位置；释放后恢复并 flush 测量。
  */
 
@@ -22,10 +31,12 @@ export const DRAG_THRESHOLD_PX = 8
 /** 两次 tap 构成双击重置的最大间隔（毫秒）。 */
 export const DOUBLE_CLICK_MAX_MS = 300
 
-/** tap 判定的最大按住时长（毫秒）。 */
+/** tap 判定的最大按住时长（毫秒）。用于区分「轻点」与「长按」：两者都走 stop-session，
+ *  只有「轻点」才可能参与双击复位。 */
 export const TAP_MAX_MS = 200
 
-/** tap 判定的最大位移（像素）。必须远小于 DRAG_THRESHOLD_PX，避免正常松开被误判为 tap。 */
+/** tap 判定的最大位移（像素）。必须远小于 DRAG_THRESHOLD_PX，避免正常松开被误判。
+ *  同时用于判定两次轻点是否落在同一处（双击复位）。 */
 export const TAP_DISTANCE_PX = 4
 
 /**
@@ -118,7 +129,10 @@ export function onPointerDown(
     startTime: now,
     winStart: null,
     scaleFactor: null,
-    lastTap: null,
+    // `lastTap` deliberately survives the next pointerdown: the second press of a
+    // double-click may be rejected by Rust ("Processing in progress") while the
+    // first click's session is still transcribing, so the dblclick handler must
+    // still see the previous tap to perform the reset.
     watchdogAt: deadline,
     resizeSuppressed: false,
   }
@@ -222,7 +236,15 @@ export function onPointerUp(
   }
 
   if (isTap(state, { x: event.screenX, y: event.screenY }, now)) {
-    cmds.push({ type: 'cancel-session' })
+    const prevTap = state.lastTap
+    const isDoubleTap =
+      prevTap !== null &&
+      now - prevTap.time <= DOUBLE_CLICK_MAX_MS &&
+      distance(prevTap.point, { x: event.screenX, y: event.screenY }) <= TAP_DISTANCE_PX
+    // A lone short press is a PTT release (stop -> transcribe). Only the second
+    // press of a double-click reset is cancelled, so the reset gesture cannot
+    // surface a "no audio captured" error.
+    cmds.push({ type: isDoubleTap ? 'cancel-session' : 'stop-session' })
     const nextState = initialOverlayDragState()
     if (state.startScreen) {
       nextState.lastTap = { point: state.startScreen, time: now }

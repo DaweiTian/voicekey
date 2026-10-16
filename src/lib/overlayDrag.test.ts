@@ -86,6 +86,40 @@ describe('onPointerDown', () => {
   })
 })
 
+describe('whole-window press surface', () => {
+  it('starts and stops a session from a press anywhere on the surface (upper / lower half)', () => {
+    // The idle / drag handlers live on the full-window container, so the press
+    // Y coordinate inside the capsule must never decide whether a session starts.
+    for (const y of [88, 100, 112]) {
+      const [state, cmds] = onPointerDown(
+        downEvent(1, { x: 100, y }),
+        initialOverlayDragState(),
+        0,
+        'idle',
+      )
+      expect(state.phase).toBe('pending')
+      expect(hasCmd(cmds, 'start-session')).toBe(true)
+      const [, upCmds] = onPointerUp(upEvent(1, { x: 100, y }), state, WATCHDOG_MAX_MS - 1)
+      expect(hasCmd(upCmds, 'stop-session')).toBe(true)
+    }
+  })
+
+  it('keeps lastTap when the second press is rejected while processing, so the reset still fires', () => {
+    let state = initialOverlayDragState()
+    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
+    ;[state] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS - 1)
+    const [afterDown] = onPointerDown(
+      downEvent(2, { x: 100, y: 100 }),
+      state,
+      TAP_MAX_MS,
+      'processing',
+    )
+    expect(afterDown.lastTap).not.toBeNull()
+    const [, cmds] = onDoubleClick(afterDown, DOUBLE_CLICK_MAX_MS - 1)
+    expect(hasCmd(cmds, 'set-overlay-position')).toBe(true)
+  })
+})
+
 describe('pending → hold-to-talk (no drag)', () => {
   it('stops the session on pointerup when movement stayed within threshold', () => {
     const [state] = onPointerDown(downEvent(1), initialOverlayDragState(), 0, 'idle')
@@ -219,13 +253,38 @@ describe('reset paths must always return to idle', () => {
 })
 
 describe('tap detection and double-click reset', () => {
-  it('treats a short press within threshold as a tap (cancel, not stop)', () => {
+  it('lone short click stops the session (records) instead of cancelling it', () => {
     let state = initialOverlayDragState()
     ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
     const [nextState, cmds] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS - 1)
+    // REGRESSION LOCK: a plain click must reach stop_session (the 0.5.1 build
+    // cancelled it here, so no click could ever record anything).
+    expect(hasCmd(cmds, 'stop-session')).toBe(true)
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
+    expect(nextState.lastTap).toEqual({ point: { x: 100, y: 100 }, time: TAP_MAX_MS - 1 })
+  })
+
+  it('cancels only the second click of a double-click, so the reset stays quiet', () => {
+    let state = initialOverlayDragState()
+    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
+    ;[state] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS - 1)
+    // Second press: the previous tap survives pointerdown so the dblclick reset
+    // can still fire even when this press is rejected by Rust.
+    ;[state] = onPointerDown(downEvent(2, { x: 100, y: 100 }), state, TAP_MAX_MS, 'idle')
+    expect(state.phase).toBe('pending')
+    const [, cmds] = onPointerUp(upEvent(2, { x: 100, y: 100 }), state, DOUBLE_CLICK_MAX_MS - 1)
     expect(hasCmd(cmds, 'cancel-session')).toBe(true)
     expect(hasCmd(cmds, 'stop-session')).toBe(false)
-    expect(nextState.lastTap).toEqual({ point: { x: 100, y: 100 }, time: TAP_MAX_MS - 1 })
+  })
+
+  it('treats a distant second click as a fresh recording, not a double-click', () => {
+    let state = initialOverlayDragState()
+    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
+    ;[state] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS - 1)
+    ;[state] = onPointerDown(downEvent(2, { x: 200, y: 200 }), state, TAP_MAX_MS, 'idle')
+    const [, cmds] = onPointerUp(upEvent(2, { x: 200, y: 200 }), state, DOUBLE_CLICK_MAX_MS - 1)
+    expect(hasCmd(cmds, 'stop-session')).toBe(true)
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
   })
 
   it('subsequent double-click resets overlay position when within time and distance', () => {

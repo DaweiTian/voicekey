@@ -15,7 +15,12 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `core:window:allow-close`）、setup 时对现有窗口做 Windows 焦点框硬化首遍，并初始化
   鼠标中键 PTT（`mouse.rs`）与常驻待机 HUD 胶囊（`commands::show_overlay_idle`）。
 - `src/windowing.rs` - 窗口生命周期共用逻辑：Windows 焦点框硬化（overlay：
-  `WS_EX_NOACTIVATE` + `DWMWA_BORDER_COLOR=NONE` 幂等重施；main：仅去 DWM 焦点框，
+  `WS_EX_NOACTIVATE` + `DWMWA_BORDER_COLOR=NONE` 幂等重施；**另剥离原生标题栏/边框
+  样式位** `WS_CAPTION|WS_SYSMENU|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX` 并配
+  `SWP_FRAMECHANGED` 提交——tao 给每个窗口都带这些位、只靠收起非客户区隐藏，一旦存在
+  非客户区 Windows 就会画原生标题栏（最小化/还原/关闭三键）；overlay 另在
+  `tauri.conf.json` 用 `"shadow": false` 消除该非客户区（默认 `shadow: true` 会给无装饰
+  窗口加 DWM 边框/阴影/圆角），此处样式剥离作二次兜底；main：仅去 DWM 焦点框，
   **不加** `WS_EX_NOACTIVATE`，保留应用自绘 CSS 边框）。**回归警示**：
   `DWMWA_COLOR_NONE` 必须使用 windows-sys 导出的常量（= `0xFFFF_FFFE`，MSDN
   DWMWINDOWATTRIBUTE）；早前手写错误字面量 `0x0100_0000` 被 DWM 当作 COLORREF，
@@ -67,7 +72,14 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   复核）判定过期时，走与渲染层定时器**相同**的 stop 管线（转写 + 注入，不走
   cancel 丢弃音频；Rust 侧即可释放会话状态并使鼠标 token 失效，麦克风关闭仍由
   渲染层收 `stop-recording` 事件完成）；与正常 stop 竞态时按会话 id 抢锁，抢不到
-  静默让路，绝不发"无录音"假 toast。
+  静默让路，绝不发"无录音"假 toast。stop 管线的「没有录到声音」按会话时长分流
+  （产品决策：误触/快速点击静默不报错）：无 PCM 且无 chunk 时，会话时长 <
+  `EMPTY_SESSION_QUIET_MS`（250ms；`getUserMedia` 出流通常需 ~100-200ms）判为误触，
+  静默 `Ok("")` 完成会话并直接回 idle（不 emit `error`/`transcription`、不弹 toast、
+  不写历史/统计，渲染层丢弃 `stop_session` 返回值故空串安全）；≥250ms 视为真实
+  麦克风故障，保留原「没有录到声音，请检查麦克风后重试。」错误。判定为纯函数
+  `empty_session_is_quiet`（附单测），时长在 stop 抢锁时按 `started_at` 采样，
+  不混入 flush 等待。
   `overlay_idle_later` 为 `pub(crate)`，`translate.rs` 直接复用（1.2s 回 idle）。
   `show_settings_window` 为 async 命令并经
   `windowing::open_main_window` 打开/重建主窗口。`set_config` 在 rebind 失败时回滚
@@ -104,12 +116,16 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `WM_MOUSEHWHEEL`=526）与其余鼠标消息一律不产生动作，因此按住中键期间滚动滚轮
   不会打断会话、也不影响 down/up 配对（附回归单测；**勿把该判定改成范围/阈值**，
   522/526 正落在 `WM_MBUTTONUP`(520) 与 `WM_MOUSELAST`(526) 之间，范围判定会重新
-  引入“滚动打断录音”的 bug）；Up 事件在 worker 侧还先用 `GetAsyncKeyState(VK_MBUTTON)`
-  高位 bit（0x8000=当前按下）复核物理键态——滚轮震动使开关弹跳产生的**真实
-  WM_MBUTTONUP** 判为弹跳忽略（纯函数 `should_treat_as_bounce` + 回归单测；**勿把
-  复核挪进钩子回调**，队列延迟正是弹跳后复核生效的前提、钩子须保持低延迟），高位=0
-  的真实松开才走停止；Disable 停止决策不复核（保持原语义），误判悬挂由 5 分钟上限
-  与 tray Disable 兜底；一切 Tauri 调用（焦点守卫、
+  引入“滚动打断录音”的 bug）；Up 事件**不立即停止**：worker 先等过一段短弹跳宽限窗
+  （`RELEASE_BOUNCE_WINDOW`=120ms）——开关抖动（按住中键滚动滚轮的震动使触点瞬断）会
+  产生「真实 WM_MBUTTONUP 紧跟 WM_MBUTTONDOWN」；窗内到达的按下即证明按键从未真正
+  离开手指，该次 Up 判为弹跳吞掉、会话与 token 均保留（纯函数
+  `release_after_bounce_window` + 回归单测），故弹跳只能**延后**停止、永不取消停止；
+  窗内无按下即真实松开，执行停止。**勿再改回用 `GetAsyncKeyState` 复核按键态**：底层
+  钩子回调在键的异步态更新**之前**被调用（LowLevelKeyboard/MouseProc 文档明示），worker
+  紧随入队后读到的仍是事件发生前的「按下」态，真机下会把每次真实松开都误判为弹跳、只能
+  等 5 分钟上限（即 P0「松中键停不下来」回归）；因果证据是成对的 down/up 事件，不是
+  采样的键态。Disable 停止决策不进宽限窗（必须立即停）；一切 Tauri 调用（焦点守卫、
   overlay 判定、启动会话）由**单个串行 worker** 按事件顺序处理，Start 记录所启动
   会话的 id 作 token，Stop 仅当 `session.id == token && status == Recording` 才停
   并清 token，其余启动/停止/取消/出错路径也清 token（`clear_owned_session`），

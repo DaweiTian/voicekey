@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.2](https://github.com/BuildWithAIs/voicekey/compare/v0.5.1...v0.5.2) (2026-10-16)
+
+### Bug Fixes
+
+- **overlay:** 待机胶囊无法录音——快速点击不再被误判为轻点取消（单击一律走正常停止转写链路），点击热区扩展至整个悬浮窗（修复上半部分无反应、下半部分闪烁但录不了音）
+- **mouse:** 中键 PTT 松开后无法停止录音——移除低级钩子回调内不可靠的 `GetAsyncKeyState` 键态复核（该读取在钩子回调时异步键态尚未更新，导致真释放被永久误判为弹跳），改为 120ms 事件宽限窗容错（弹跳只能延迟停止、不会取消停止）
+- **overlay:** 悬浮胶囊周围出现矩形边框、顶部横线与最小化/恢复/关闭三按钮——overlay 窗口显式关闭 `shadow`（非客户区帧带是 DWM 边框与原生标题栏的来源），并防御性剥离窗口 caption 风格位
+- **session:** 快速误触不再弹「没有录到声音」错误——会话时长 <250ms 且无任何音频时静默回到待机态；≥250ms 无音频仍保留错误提示（真实麦克风故障）
+
 ## [0.5.1](https://github.com/BuildWithAIs/voicekey/compare/v0.5.0...v0.5.1) (2026-10-16)
 
 ### Features

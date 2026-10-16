@@ -18,24 +18,31 @@
 //!   message→action decision is the pure `win::classify` whitelist, locked by
 //!   regression tests; see its comment for the `WM_MOUSELAST`/wheel range trap
 //!   it guards.
-//! * **Bounce-tolerant release.** Scrolling the wheel vibrates the middle
-//!   switch, and a mechanical switch can bounce *open* for a moment: Windows
-//!   then delivers a real `WM_MBUTTONUP` (immediately followed by another
-//!   `WM_MBUTTONDOWN`) although the user still holds the button. Before a
-//!   release stops anything the worker re-checks the physical key state
-//!   (`GetAsyncKeyState(VK_MBUTTON)`, high bit 0x8000 = "currently held"):
-//!   still held → the release is ignored as a bounce and both the session and
-//!   the ownership token are kept, so the genuine release still stops later;
-//!   actually released → the stop proceeds exactly as before. The re-check
-//!   must stay on the worker, never in the hook callback: the queue delay is
-//!   exactly what lets the switch already be re-pressed when the spurious Up
-//!   is handled, and the hook keeps its latency budget. The `Disable` stop
-//!   decision is never re-checked (it must always stop); worst case (a
-//!   genuine release misread as a bounce leaves a session running) the
-//!   5-minute session cap — doubly backed by the renderer's `setTimeout` and
-//!   the Rust watchdog (`commands::spawn_session_time_watchdog`) — and the
-//!   tray Disable path still end it. Decision logic is the pure
-//!   `win::should_treat_as_bounce`, locked by tests.
+//! * **Bounce-tolerant release — event-driven, never key-state-driven.**
+//!   Scrolling the wheel vibrates the middle switch, and a mechanical switch
+//!   can chatter *open* for a moment: Windows then delivers a real
+//!   `WM_MBUTTONUP` immediately followed by another `WM_MBUTTONDOWN`, although
+//!   the finger still holds the button. The worker therefore never acts on a
+//!   release at once: it waits out a short grace window
+//!   (`win::RELEASE_BOUNCE_WINDOW`) for that re-press. A press inside the
+//!   window is the causal proof that the switch never really opened — the
+//!   release is absorbed as chatter and both the session and the ownership
+//!   token are kept, so the genuine release still stops later. No press inside
+//!   the window (or a press only after it) is a genuine release and the stop
+//!   proceeds. Chatter can thus only *delay* a stop, never veto it.
+//!
+//!   **Regression trap (P0: "middle-button release never stops").** The first
+//!   attempt gated the release on `GetAsyncKeyState(VK_MBUTTON)` (high bit =
+//!   "currently held") read on the worker, "vetoing" the stop while held. That
+//!   signal is unusable for the event being handled: a low-level hook callback
+//!   runs *before* the asynchronous key state is updated (documented on
+//!   `LowLevelKeyboardProc`/`LowLevelMouseProc`), so reading it from the worker
+//!   right after the enqueue still observes the pre-event (held) state on real
+//!   hardware — every genuine release was swallowed as a bounce and the
+//!   recording only ended at the 5-minute cap. The event *pair* is the causal
+//!   evidence; a sampled key state is not. Decision logic is the pure
+//!   `win::release_after_bounce_window`, locked by tests. The `Disable` stop
+//!   decision never enters the grace window (it must always stop).
 //! * **Hook latency budget.** `WH_MOUSE_LL` callbacks must return quickly (the
 //!   system silently removes hooks that block, ~300 ms), so the hook procedure
 //!   only performs *local* Win32 calls (the `WindowFromPoint`/`GetAncestor`
@@ -95,7 +102,6 @@ mod win {
     use tauri::{AppHandle, Manager};
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
     use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MBUTTON};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetAncestor, PeekMessageW, SetWindowsHookExW,
         TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK, MSG,
@@ -135,17 +141,17 @@ mod win {
         /// `WM_MBUTTONUP`.
         Up,
         /// The setting was turned off (possibly mid-press): same stop decision
-        /// as a release (but never bounce-re-checked), so an owned recording
-        /// cannot be orphaned.
+        /// as a release (but never held back by the bounce grace window), so an
+        /// owned recording cannot be orphaned.
         Disable,
     }
 
     /// Whether the stop decision came from a real button release or from the
-    /// setting turning off: only a real release is bounce-re-checked (see
-    /// [`handle_middle_up`]).
+    /// setting turning off: only a real release goes through the bounce grace
+    /// window (see [`handle_deferred_release`]).
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
     enum StopCause {
-        /// `WM_MBUTTONUP`: re-check the physical key state first.
+        /// `WM_MBUTTONUP`, already past the bounce grace window.
         Release,
         /// Setting turned off mid-press: stop unconditionally.
         Disable,
@@ -155,6 +161,47 @@ mod win {
     /// while disarmed (cheap idle).
     const POLL_ARMED: Duration = Duration::from_millis(5);
     const POLL_DISARMED: Duration = Duration::from_millis(50);
+
+    /// Grace window a release waits out for a possible re-press before it is
+    /// allowed to stop the session. Middle-switch chatter (a contact that
+    /// momentarily opens while the finger still holds the button, e.g. while
+    /// scrolling the wheel) re-presses within a few milliseconds; the window
+    /// leaves a wide margin over that. It must stay well under human
+    /// re-click speed (≈200 ms and up) so two deliberate press/release pairs
+    /// are never merged into one session, and it only *delays* the stop — the
+    /// recording itself keeps running until the stop, so a short window costs
+    /// the user a few tens of milliseconds before transcription starts.
+    const RELEASE_BOUNCE_WINDOW: Duration = Duration::from_millis(120);
+
+    /// Outcome of a release once its grace window has been waited out.
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    enum ReleaseResolution {
+        /// A press re-asserted the button inside the window: switch chatter,
+        /// the session must survive.
+        Bounce,
+        /// No re-press: the button really left the user's finger, stop it.
+        Stop,
+    }
+
+    /// Pure decision for a release after its grace window.
+    ///
+    /// `next_press_delay` is how long after the release a `WM_MBUTTONDOWN`
+    /// arrived, or `None` when no press arrived before
+    /// [`RELEASE_BOUNCE_WINDOW`] expired. A press inside the window proves the
+    /// switch never really opened (scroll-vibration chatter) and must NOT stop
+    /// the session; everything else — no press at all, or a press only after
+    /// the window — is a genuine release that must stop. Chatter can only
+    /// delay a stop, never veto it. Pure so the release semantics are
+    /// unit-testable without a real hook or mouse (the old
+    /// `GetAsyncKeyState`-based test read a sample the OS does not settle until
+    /// after the hook callback, which is exactly how it passed while breaking
+    /// on real hardware).
+    fn release_after_bounce_window(next_press_delay: Option<Duration>) -> ReleaseResolution {
+        match next_press_delay {
+            Some(delay) if delay <= RELEASE_BOUNCE_WINDOW => ReleaseResolution::Bounce,
+            _ => ReleaseResolution::Stop,
+        }
+    }
 
     /// Remember the app handle used by the hook procedure and start the serial
     /// worker that performs all Tauri-side work. Idempotent.
@@ -218,7 +265,7 @@ mod win {
         while let Some(event) = rx.recv().await {
             match event {
                 MiddleEvent::Down { root_hwnd } => handle_middle_down(root_hwnd),
-                MiddleEvent::Up => handle_middle_up(StopCause::Release),
+                MiddleEvent::Up => handle_deferred_release(&mut rx).await,
                 MiddleEvent::Disable => handle_middle_up(StopCause::Disable),
             }
         }
@@ -264,10 +311,11 @@ mod win {
                 match id {
                     Some(id) => {
                         // Boundary instrumentation: a hardware switch bounce
-                        // (spurious release while scrolling) shows up as this
-                        // line, then "bounce-tolerant release ignored" and a
-                        // "start rejected" line for the re-press; a genuine
-                        // release shows up as the release/stop line instead.
+                        // (spurious release while scrolling) shows up as a
+                        // "release absorbed as switch chatter" line followed by
+                        // a "start rejected: Already recording" line for the
+                        // re-press; a genuine release shows up as the
+                        // release/stop line instead.
                         log::debug!("mouse: middle-button press started session {id}");
                         set_owned_session(Some(id));
                     }
@@ -281,32 +329,62 @@ mod win {
         }
     }
 
-    /// Worker-side `WM_MBUTTONUP` / disable: stop only the session this hook
-    /// started and that is still recording; anything else is a no-op.
+    /// Worker-side `WM_MBUTTONUP`, bounce-tolerant.
     ///
-    /// A real release first re-checks the physical key state (bounce
-    /// tolerance); [`StopCause::Disable`] keeps its original semantics and
-    /// stops unconditionally. On a bounce this returns *before* taking the
-    /// ownership token, so the genuine release can still stop the session.
-    fn handle_middle_up(cause: StopCause) {
-        if cause == StopCause::Release {
-            // Hardware-switch bounce (e.g. the vibration of scrolling the
-            // wheel while the button is held) delivers a real WM_MBUTTONUP
-            // while the finger still holds the switch. The queue delay is
-            // exactly what makes this re-check reliable: by the time the
-            // worker handles the spurious Up, the following press has usually
-            // re-asserted the key physically. Never move this re-check into
-            // the hook callback: there the spurious Up would still see the
-            // momentarily open switch (and the hook must keep its latency
-            // budget). Worst case (a genuine release misread as a bounce
-            // leaves a session running) the 5-minute session cap — renderer
-            // `setTimeout` and the Rust watchdog in `commands.rs`, dual
-            // backstops — and the tray Disable path still end the recording.
-            if should_treat_as_bounce(middle_button_key_state()) {
-                log::debug!("mouse: bounce-tolerant release ignored");
-                return;
+    /// A release is never acted on at once: the worker waits out
+    /// [`RELEASE_BOUNCE_WINDOW`] for a possible re-press. A mechanical middle
+    /// switch that is still held (the vibration of scrolling the wheel chatters
+    /// the contacts open) makes Windows emit a real `WM_MBUTTONUP` immediately
+    /// followed by a `WM_MBUTTONDOWN`; that press is the proof the button never
+    /// left the user's finger, so the release is absorbed as chatter
+    /// ([`release_after_bounce_window`]) and the session keeps running. No press
+    /// inside the window means the release was genuine and the stop always
+    /// proceeds, so chatter can only ever *delay* a stop — never cancel it (the
+    /// P0 regression: the old `GetAsyncKeyState` veto could, and did, swallow
+    /// every genuine release).
+    ///
+    /// Only the physical button decides this; `Disable` deliberately skips the
+    /// window (it must always stop, even mid-press). The wait is safe on the
+    /// serial worker: events stay queued in order and any `Disable`/press that
+    /// does arrive is handled immediately by this same loop.
+    async fn handle_deferred_release(rx: &mut UnboundedReceiver<MiddleEvent>) {
+        let started = std::time::Instant::now();
+        match tokio::time::timeout(RELEASE_BOUNCE_WINDOW, rx.recv()).await {
+            // Re-press inside the window: chatter while the button is still
+            // held. Absorb the release and treat the press normally (the
+            // session is still `Recording`, so `start_session_internal`
+            // rejects it as "Already recording" and the token is untouched).
+            Ok(Some(MiddleEvent::Down { root_hwnd })) => {
+                match release_after_bounce_window(Some(started.elapsed())) {
+                    ReleaseResolution::Bounce => {
+                        log::debug!("mouse: release absorbed as switch chatter while scrolling");
+                        handle_middle_down(root_hwnd);
+                    }
+                    // Only reachable if the timer expired in the same instant
+                    // the press was dequeued: the release had already matured,
+                    // so it stops and the press is a fresh one.
+                    ReleaseResolution::Stop => {
+                        handle_middle_up(StopCause::Release);
+                        handle_middle_down(root_hwnd);
+                    }
+                }
             }
+            // The setting turned off inside the window must still stop at once.
+            Ok(Some(MiddleEvent::Disable)) => handle_middle_up(StopCause::Disable),
+            // Two releases with no press between them: the button is genuinely
+            // up (chatter would have re-pressed first), so stop.
+            Ok(Some(MiddleEvent::Up)) => handle_middle_up(StopCause::Release),
+            // Channel closed (worker shutting down) or the window elapsed with
+            // no re-press: the release is genuine.
+            Ok(None) => {}
+            Err(_elapsed) => handle_middle_up(StopCause::Release),
         }
+    }
+
+    /// Worker-side stop decision for a release past its grace window / for a
+    /// disable: stop only the session this hook started and that is still
+    /// recording; anything else is a no-op.
+    fn handle_middle_up(cause: StopCause) {
         // Taking the token clears ownership unconditionally, as required for
         // every Stop decision.
         let owned_id = OWNED_SESSION
@@ -330,11 +408,11 @@ mod win {
             // keyboard PTT started a new one): never stop a foreign session
             // and never emit a bogus "no recording" error toast.
             log::debug!(
-                "mouse: middle-button release ignored (owned session {owned_id} is no longer recording)"
+                "mouse: middle-button {cause:?} ignored (owned session {owned_id} is no longer recording)"
             );
             return;
         }
-        log::debug!("mouse: middle-button release stopping session {owned_id}");
+        log::debug!("mouse: middle-button {cause:?} stopping session {owned_id}");
         // The hook must return fast and the worker must keep draining events
         // in order (so a queued Start is decided against the current state,
         // not against a transcription that may run for a minute): run the
@@ -345,28 +423,6 @@ mod win {
                 log::warn!("mouse: stop_session_internal failed: {e}");
             }
         });
-    }
-
-    /// `GetAsyncKeyState` high bit = "the key is currently down". The low bit
-    /// (0x01, "pressed since the last query") is history, not physical state.
-    const KEY_STATE_DOWN_HIGH_BIT: u16 = 0x8000;
-
-    /// Raw `GetAsyncKeyState(VK_MBUTTON)` result; see [`should_treat_as_bounce`]
-    /// for how the bits are read. One cheap, non-blocking Win32 call — safe
-    /// here on the worker, but never to be called from the hook callback.
-    fn middle_button_key_state() -> i16 {
-        // SAFETY: reading shared input state cannot fail and does not block.
-        unsafe { GetAsyncKeyState(VK_MBUTTON as i32) }
-    }
-
-    /// Pure bounce decision for a middle-button release: the release is a
-    /// hardware-switch bounce and must be ignored while the physical key is
-    /// still held — decided by the high bit (0x8000) of the raw
-    /// `GetAsyncKeyState` state, never by the low "pressed since the last
-    /// query" bit. Pure so the release semantics are unit-testable without a
-    /// real hook or keyboard.
-    fn should_treat_as_bounce(key_state: i16) -> bool {
-        (key_state as u16 & KEY_STATE_DOWN_HIGH_BIT) != 0
     }
 
     /// True when the given root window (top-level window under the cursor at
@@ -437,8 +493,8 @@ mod win {
     enum Trigger {
         /// `WM_MBUTTONDOWN`: begin a middle-button push-to-talk session.
         Down,
-        /// `WM_MBUTTONUP`: end it (bounce-tolerant: the worker re-checks the
-        /// physical key state first, see [`should_treat_as_bounce`]).
+        /// `WM_MBUTTONUP`: end it, after waiting out the bounce grace window
+        /// (see [`handle_deferred_release`] / [`release_after_bounce_window`]).
         Up,
     }
 
@@ -565,25 +621,74 @@ mod win {
             }
         }
 
-        /// Regression (hardware bounce): while the physical middle button is
-        /// still held — high bit (0x8000) of `GetAsyncKeyState` set — a
-        /// release must be treated as a bounce and must NOT stop the session:
-        /// the worker keeps the session and the ownership token so the genuine
-        /// release can still stop later.
+        /// Regression (bug ⑦, hardware bounce): a release whose button
+        /// re-presses inside the grace window is switch chatter caused by
+        /// scrolling with the middle button held — the session must survive,
+        /// with its ownership token intact so the genuine release still stops
+        /// it later.
         #[test]
-        fn release_while_still_held_is_a_bounce_and_must_not_stop() {
-            assert!(should_treat_as_bounce(0x8000u16 as i16));
-            // High bit wins even alongside other bits (low-bit history).
-            assert!(should_treat_as_bounce(0x8001u16 as i16));
+        fn press_inside_the_window_is_bounce_chatter() {
+            assert_eq!(
+                release_after_bounce_window(Some(Duration::ZERO)),
+                ReleaseResolution::Bounce
+            );
+            assert_eq!(
+                release_after_bounce_window(Some(Duration::from_millis(1))),
+                ReleaseResolution::Bounce
+            );
+            assert_eq!(
+                release_after_bounce_window(Some(RELEASE_BOUNCE_WINDOW)),
+                ReleaseResolution::Bounce,
+                "the window boundary is inclusive"
+            );
         }
 
-        /// A genuinely released key (high bit clear) must trigger the stop.
-        /// The low bit (0x01, "pressed since the last query") is history, not
-        /// physical state, and must never read as "still held".
+        /// Regression (P0, bug 2): a genuine release must ALWAYS stop. No press
+        /// inside the window — or a press only after it — is not chatter, so
+        /// the stop must never be vetoed. The removed
+        /// `GetAsyncKeyState`-based check vetoed every real release and left the
+        /// recording running until the 5-minute cap.
         #[test]
-        fn release_after_genuine_release_triggers_stop() {
-            assert!(!should_treat_as_bounce(0));
-            assert!(!should_treat_as_bounce(0x0001u16 as i16));
+        fn genuine_release_always_stops() {
+            assert_eq!(release_after_bounce_window(None), ReleaseResolution::Stop);
+            assert_eq!(
+                release_after_bounce_window(Some(RELEASE_BOUNCE_WINDOW + Duration::from_millis(1))),
+                ReleaseResolution::Stop
+            );
+            assert_eq!(
+                release_after_bounce_window(Some(Duration::from_secs(5))),
+                ReleaseResolution::Stop
+            );
+        }
+
+        /// The window must be a real chatter filter yet stay well below human
+        /// re-click speed, so a genuine release still stops promptly and two
+        /// deliberate press/release pairs are never merged.
+        #[test]
+        fn bounce_window_is_tuned_between_chatter_and_human_speed() {
+            assert!(RELEASE_BOUNCE_WINDOW >= Duration::from_millis(5));
+            assert!(RELEASE_BOUNCE_WINDOW <= Duration::from_millis(200));
+        }
+
+        /// Full scroll-chatter timeline: while the user scrolls with the
+        /// button held, the switch chatters (each Up/Down pair) and every Up
+        /// must be absorbed; the final Up with no press after it must stop the
+        /// session. Locks bug ⑦ and P0 (bug 2) together in one sequence.
+        #[test]
+        fn scroll_chatter_then_final_release_still_stops() {
+            for chatter in [
+                Duration::ZERO,
+                Duration::from_millis(3),
+                Duration::from_millis(15),
+            ] {
+                assert_eq!(
+                    release_after_bounce_window(Some(chatter)),
+                    ReleaseResolution::Bounce,
+                    "chatter {chatter:?} after a release must not stop the session"
+                );
+            }
+            // The finger finally lifts: no re-press ever arrives.
+            assert_eq!(release_after_bounce_window(None), ReleaseResolution::Stop);
         }
     }
 }
