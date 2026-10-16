@@ -1,10 +1,11 @@
-import { ReactNode, useMemo } from 'react'
+import { ReactNode } from 'react'
 import { Type, Volume2, CalendarDays, TrendingUp } from 'lucide-react'
-import { computeStats, type HistoryItem } from '@/lib/stats'
+import type { DictationStats } from '@/lib/stats'
 import { useStatFormatters } from '@/lib/useStatFormatters'
 
 interface StatsOverviewProps {
-  historyItems: HistoryItem[]
+  /** 已合并 Rust 独立累计统计的概览（`@/lib/stats::computeStats` 产出） */
+  stats: DictationStats
 }
 
 const rangeDays = 7
@@ -36,9 +37,8 @@ function StatTile({
   )
 }
 
-export default function StatsOverview({ historyItems }: StatsOverviewProps) {
+export default function StatsOverview({ stats }: StatsOverviewProps) {
   const { t, formatNumber, formatDuration, formatPeakDay } = useStatFormatters()
-  const stats = useMemo(() => computeStats(historyItems, rangeDays), [historyItems])
   const rangeLabel = t('home.range.label', { count: rangeDays })
 
   return (
@@ -60,7 +60,12 @@ export default function StatsOverview({ historyItems }: StatsOverviewProps) {
         icon={<Volume2 className="h-[15px] w-[15px]" />}
         label={t('home.stats.totalAudio')}
         value={formatDuration(stats.totalAudioMs)}
-        sub={`${rangeLabel} +${formatDuration(stats.recentAudioMs)}`}
+        sub={
+          // 有识别内容但从未记录过时长（老记录无 duration）时显示 —
+          stats.totalAudioMs === 0 && stats.totalCharacters > 0
+            ? '—'
+            : `${rangeLabel} +${formatDuration(stats.recentAudioMs)}`
+        }
       />
       <StatTile
         icon={<CalendarDays className="h-[15px] w-[15px]" />}

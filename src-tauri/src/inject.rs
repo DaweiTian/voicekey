@@ -28,30 +28,28 @@ fn paste_via_clipboard(text: &str) -> Result<(), String> {
 
     thread::sleep(Duration::from_millis(40));
 
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| format!("keyboard backend failed: {e}"))?;
-
     // Ctrl+V on Windows/Linux, Cmd+V on macOS
-    let modifier = if cfg!(target_os = "macos") {
-        Key::Meta
-    } else {
-        Key::Control
-    };
-    enigo
-        .key(modifier, Direction::Press)
-        .map_err(|e| e.to_string())?;
-    enigo
-        .key(Key::Unicode('v'), Direction::Click)
-        .map_err(|e| e.to_string())?;
-    enigo
-        .key(modifier, Direction::Release)
-        .map_err(|e| e.to_string())?;
+    chord(modifier_key(), Key::Unicode('v'))?;
 
     thread::sleep(Duration::from_millis(50));
     Ok(())
 }
 
 fn paste_via_hyprland(text: &str) -> Result<(), String> {
+    hyprland_set_clipboard(text)?;
+
+    thread::sleep(Duration::from_millis(75));
+
+    // Shift+Insert is the conventional paste on Hyprland GUI targets.
+    chord(Key::Shift, Key::Insert)?;
+    thread::sleep(Duration::from_millis(100));
+    Ok(())
+}
+
+/// Write text into the Wayland clipboard via `wl-copy --sensitive` (Hyprland).
+/// Public so the selection-translation flow (translate.rs) can set / restore
+/// clipboard contents on the same path paste uses.
+pub fn hyprland_set_clipboard(text: &str) -> Result<(), String> {
     use std::io::Write;
     use std::process::Stdio;
 
@@ -73,23 +71,51 @@ fn paste_via_hyprland(text: &str) -> Result<(), String> {
     if !status.success() {
         return Err("wl-copy failed".into());
     }
+    Ok(())
+}
 
-    thread::sleep(Duration::from_millis(75));
+/// Ctrl on Windows/Linux, Cmd on macOS.
+fn modifier_key() -> Key {
+    if cfg!(target_os = "macos") {
+        Key::Meta
+    } else {
+        Key::Control
+    }
+}
 
-    // Shift+Insert is the conventional paste on Hyprland GUI targets.
+/// Press `modifier` down, tap `key`, release `modifier` (the clipboard chord
+/// pattern used by copy / paste). No sleeps here: callers own their settle
+/// delays.
+fn chord(modifier: Key, key: Key) -> Result<(), String> {
     let mut enigo =
         Enigo::new(&Settings::default()).map_err(|e| format!("keyboard backend failed: {e}"))?;
     enigo
-        .key(Key::Shift, Direction::Press)
+        .key(modifier, Direction::Press)
         .map_err(|e| e.to_string())?;
     enigo
-        .key(Key::Insert, Direction::Click)
+        .key(key, Direction::Click)
         .map_err(|e| e.to_string())?;
     enigo
-        .key(Key::Shift, Direction::Release)
-        .map_err(|e| e.to_string())?;
-    thread::sleep(Duration::from_millis(100));
-    Ok(())
+        .key(modifier, Direction::Release)
+        .map_err(|e| e.to_string())
+}
+
+/// Simulate the platform copy chord (Ctrl+C / Cmd+C) so the foreground app
+/// writes its current selection to the clipboard. Used by the selection
+/// translation flow (translate.rs); deliberately does not touch clipboard
+/// contents itself.
+pub fn simulate_copy() -> Result<(), String> {
+    chord(modifier_key(), Key::Unicode('c'))
+}
+
+/// Simulate the platform paste chord *without* writing the clipboard: callers
+/// that manage clipboard save/restore themselves (translate.rs) use this so
+/// they can restore the original clipboard content afterwards.
+pub fn simulate_paste() -> Result<(), String> {
+    if platform::is_hyprland_session() {
+        return chord(Key::Shift, Key::Insert);
+    }
+    chord(modifier_key(), Key::Unicode('v'))
 }
 
 pub fn press_key(key: Key) -> Result<(), String> {

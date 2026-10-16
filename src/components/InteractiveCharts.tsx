@@ -3,6 +3,7 @@ import { Area, AreaChart, CartesianGrid, XAxis } from 'recharts'
 import { useTranslation } from 'react-i18next'
 import { getLocale } from '@/shared/i18n'
 import { cn } from '@/lib/utils'
+import { countCharacters } from '@/lib/stats'
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -32,8 +33,6 @@ interface InteractiveChartsProps {
   historyItems: HistoryItem[]
   loading: boolean
 }
-
-const countCharacters = (text: string): number => text.replace(/\s+/g, '').length
 
 const buildDateKey = (date: Date): string => {
   const year = date.getFullYear()

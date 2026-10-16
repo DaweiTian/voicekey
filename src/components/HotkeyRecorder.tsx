@@ -71,7 +71,12 @@ export function HotkeyRecorder({
       e.preventDefault()
       e.stopPropagation()
 
-      if (isModifierOnly(e.key)) {
+      const token = normalizeKey(e)
+      // 未识别 / 被丢弃的键（如 AltGr 释放时补发的合成 Control keyup）：
+      // 忽略即可，等待真实按键的 keyup 或 Esc / 失焦收尾
+      if (!token) return
+
+      if (isModifierOnly(token)) {
         if (pressedKeysRef.current.size === 1 && !hasNonModifierKey(pressedKeysRef.current)) {
           if (!allowModifierOnly) {
             toast.error(t('hotkey.toast.invalid'), {
@@ -83,10 +88,10 @@ export function HotkeyRecorder({
             return
           }
 
-          const accelerator = normalizeKey(e)
-          if (accelerator) {
-            onChange(accelerator)
-          }
+          // 提交按键集合里的 token（而不是 keyup 归一值）：AltGr 松开时可能先收到
+          // 合成 Control 的 keyup，集合中的 'AltRight' 才是用户实际按下的键
+          const soleKey = [...pressedKeysRef.current][0]
+          onChange(soleKey ?? token)
           setIsRecording(false)
           pressedKeysRef.current.clear()
           setPressedKeys(new Set())
@@ -95,9 +100,8 @@ export function HotkeyRecorder({
       }
 
       if (pressedKeysRef.current.size > 0) {
-        const modifiers = ['Command', 'Control', 'Alt', 'Shift']
         const keysArray = [...pressedKeysRef.current]
-        const mainKeyCount = keysArray.filter((k) => !modifiers.includes(k)).length
+        const mainKeyCount = keysArray.filter((k) => !isModifierOnly(k)).length
 
         if (mainKeyCount > 1) {
           toast.error(t('hotkey.toast.invalid'), {
@@ -146,6 +150,16 @@ export function HotkeyRecorder({
       window.removeEventListener('blur', handleBlur)
     }
   }, [allowModifierOnly, disabled, isRecording, onChange, t])
+
+  // 录制期间通知 Rust 屏蔽全局快捷键触发（PTT / 翻译），否则录入组合键时会误启动录音。
+  // effect cleanup 覆盖所有退出路径（提交、Esc、点击外部、失焦、卸载），保证 flag 不会卡死。
+  useEffect(() => {
+    if (!isRecording || disabled) return
+    void window.electronAPI?.setHotkeyCaptureActive(true)?.catch(() => undefined)
+    return () => {
+      void window.electronAPI?.setHotkeyCaptureActive(false)?.catch(() => undefined)
+    }
+  }, [disabled, isRecording])
 
   const startRecording = useCallback(() => {
     if (!disabled) {

@@ -20,6 +20,7 @@ import {
   Trash2,
   Monitor,
   KeyRound,
+  MousePointer,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -70,6 +71,7 @@ import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { validateHotkey } from '@/lib/hotkey-utils'
 import {
+  applyPersistedHotkeyState,
   applyPersistedSecretState,
   getRefineConnectionFingerprint,
   invalidateRefineConnection,
@@ -148,6 +150,10 @@ function isTranslationConfigDirty(
   return current.enabled !== original.enabled || current.targetLanguage !== original.targetLanguage
 }
 
+function isMouseConfigDirty(current: AppConfig['mouse'], original: AppConfig['mouse']): boolean {
+  return (current?.middleClickPtt ?? false) !== (original?.middleClickPtt ?? false)
+}
+
 /**
  * A stored API key is shown as a selectable placeholder. If the user inserts text without
  * replacing the whole selection (paste/mid-string caret), the placeholder plus the new text would
@@ -175,6 +181,7 @@ function mergeConfigPatch(config: AppConfig, patch: Partial<AppConfig>): AppConf
     translation: patch.translation
       ? { ...config.translation, ...patch.translation }
       : config.translation,
+    mouse: patch.mouse ? { ...config.mouse, ...patch.mouse } : config.mouse,
   }
 }
 
@@ -469,6 +476,7 @@ export default function SettingsPage() {
       translateKey: '',
     },
     translation: defaultTranslationConfig,
+    mouse: { middleClickPtt: false },
   })
 
   const [originalConfig, setOriginalConfig] = useState<AppConfig | null>(null)
@@ -895,6 +903,7 @@ export default function SettingsPage() {
       currentConfig.translation,
       currentOriginalConfig.translation,
     )
+    const mouseDirty = isMouseConfigDirty(currentConfig.mouse, currentOriginalConfig.mouse)
     const refineError = refineDirty ? getRefineErrorMessage(normalizedRefineConfig) : null
     const hotkeyError = hotkeyDirty ? getHotkeyErrorMessage(currentConfig.hotkey) : null
 
@@ -925,6 +934,10 @@ export default function SettingsPage() {
       patch.translation = currentConfig.translation
     }
 
+    if (mouseDirty) {
+      patch.mouse = { middleClickPtt: currentConfig.mouse?.middleClickPtt ?? false }
+    }
+
     const invalidMessage = hotkeyError ?? refineError
 
     if (Object.keys(patch).length === 0) {
@@ -939,7 +952,9 @@ export default function SettingsPage() {
     setSaveStatus({ state: 'saving', message: t('settings.autoSave.saving') })
 
     try {
-      await window.electronAPI.setConfig(patch)
+      // set_config 返回持久化（脱敏）后的完整配置；rebind 失败时 hotkey 已在主进程
+      // 回滚并通过 hotkeyRolledBack 标记，渲染层必须据此同步，避免脏值反复重发。
+      const saveResult = await window.electronAPI.setConfig(patch)
       try {
         // Re-read from the main process so newly entered secrets immediately become placeholders
         // and legacy-encryption status reflects the persisted state.
@@ -947,7 +962,13 @@ export default function SettingsPage() {
         latestOriginalConfigRef.current = persistedConfig
         setOriginalConfig(persistedConfig)
         setConfig((current) => {
-          const next = applyPersistedSecretState(current, patch, persistedConfig)
+          let next = applyPersistedSecretState(current, patch, persistedConfig)
+          next = applyPersistedHotkeyState(
+            next,
+            patch,
+            saveResult.config,
+            saveResult.hotkeyRolledBack,
+          )
           latestConfigRef.current = next
           return next
         })
@@ -957,9 +978,23 @@ export default function SettingsPage() {
         console.error('Failed to refresh masked config after save:', reloadError)
         setOriginalConfig((prev) => {
           if (!prev) return prev
-          const merged = mergeConfigPatch(prev, patch)
+          // 快捷键以 set_config 的持久化结果为准（rebind 失败时是回滚后的值）
+          const merged = {
+            ...mergeConfigPatch(prev, patch),
+            hotkey: { ...saveResult.config.hotkey },
+          }
           latestOriginalConfigRef.current = merged
           return merged
+        })
+        setConfig((current) => {
+          const next = applyPersistedHotkeyState(
+            current,
+            patch,
+            saveResult.config,
+            saveResult.hotkeyRolledBack,
+          )
+          latestConfigRef.current = next
+          return next
         })
       }
 
@@ -998,7 +1033,8 @@ export default function SettingsPage() {
       isAsrConfigDirty(config.asr, originalConfig.asr) ||
       isLlmRefineDirty(normalizedRefineConfig, originalConfig.llmRefine) ||
       isHotkeyConfigDirty(config.hotkey, originalConfig.hotkey) ||
-      isTranslationConfigDirty(config.translation, originalConfig.translation)
+      isTranslationConfigDirty(config.translation, originalConfig.translation) ||
+      isMouseConfigDirty(config.mouse, originalConfig.mouse)
 
     if (!hasPendingChanges) return
 
@@ -1705,18 +1741,29 @@ export default function SettingsPage() {
     setLinuxIntegrationError(null)
     try {
       clearAutoSaveTimer()
-      await window.electronAPI.setConfig({
+      const saveResult = await window.electronAPI.setConfig({
         hotkey: config.hotkey,
         translation: config.translation,
       })
+      // 快捷键以持久化结果为准（rebind 失败时已回滚），保持 dirty 判定与实际生效值一致
       setOriginalConfig((current) => {
         if (!current) return current
         const next = {
           ...current,
-          hotkey: config.hotkey,
+          hotkey: { ...saveResult.config.hotkey },
           translation: config.translation,
         }
         latestOriginalConfigRef.current = next
+        return next
+      })
+      setConfig((current) => {
+        const next = applyPersistedHotkeyState(
+          current,
+          { hotkey: config.hotkey },
+          saveResult.config,
+          saveResult.hotkeyRolledBack,
+        )
+        latestConfigRef.current = next
         return next
       })
       const status = await window.electronAPI.installLinuxIntegration()
@@ -2627,6 +2674,28 @@ export default function SettingsPage() {
               </Alert>
             )}
           </div>
+
+          {/* 鼠标触发（仅 Windows：中键 PTT 依赖 WH_MOUSE_LL 钩子） */}
+          {window.electronAPI.platform === 'win32' && (
+            <SectionCard
+              icon={<MousePointer className="h-[18px] w-[18px]" />}
+              title={t('settings.mouse.title')}
+              desc={t('settings.mouse.description')}
+            >
+              <ToggleRow
+                title={t('settings.mouse.middleClickPtt')}
+                desc={t('settings.mouse.middleClickPttHelp')}
+                checked={config.mouse?.middleClickPtt ?? false}
+                disabled={isConfigLoading}
+                onChange={(checked) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    mouse: { ...prev.mouse, middleClickPtt: checked },
+                  }))
+                }
+              />
+            </SectionCard>
+          )}
 
           {window.electronAPI.platform === 'linux' && (
             <SectionCard

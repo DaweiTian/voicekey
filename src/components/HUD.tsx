@@ -1,75 +1,50 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { AudioLines, Check, Globe, Mic, Sparkles, X, Zap } from 'lucide-react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
+import { AudioLines, Check, Globe, Mic, Sparkles, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { OverlayProcessingStage, OverlayState } from '@/shared/types'
+import type { OverlayProcessingStage, OverlayState, OverlayStatus } from '@/shared/types'
 import { cn } from '../lib/utils'
 import { Waveform } from './Waveform'
 
-const PROCESSING_STEPS: OverlayProcessingStage[] = ['transcribing', 'refining']
+/** 窗口缩放到胶囊内容尺寸时的内边距（每侧 2px）。 */
+const OVERLAY_PADDING_PX = 2
 
+/**
+ * 各处理阶段的小面积语义色：只作用于转圈描边与阶段图标，
+ * 胶囊底色在所有状态下保持统一的深色玻璃。
+ */
 const STAGE_META: Record<
   OverlayProcessingStage,
   {
     icon: typeof AudioLines
     iconColor: string
-    titleColor: string
-    badgeBorder: string
-    badgeBg: string
-    badgeText: string
     spinnerTop: string
     spinnerBottom: string
-    pillActiveBorder: string
-    pillActiveBg: string
-    pillActiveText: string
   }
 > = {
   transcribing: {
     icon: AudioLines,
     iconColor: 'text-indigo-300',
-    titleColor: 'text-indigo-200',
-    badgeBorder: 'border-indigo-400/30',
-    badgeBg: 'bg-indigo-500/10',
-    badgeText: 'text-indigo-200',
     spinnerTop: 'border-t-indigo-400',
-    spinnerBottom: 'border-b-indigo-500/20',
-    pillActiveBorder: 'border-indigo-400/40',
-    pillActiveBg: 'bg-indigo-500/15',
-    pillActiveText: 'text-indigo-100',
+    spinnerBottom: 'border-b-indigo-500/25',
   },
   refining: {
     icon: Sparkles,
     iconColor: 'text-violet-300',
-    titleColor: 'text-violet-200',
-    badgeBorder: 'border-violet-400/30',
-    badgeBg: 'bg-violet-500/10',
-    badgeText: 'text-violet-200',
     spinnerTop: 'border-t-violet-400',
-    spinnerBottom: 'border-b-violet-500/20',
-    pillActiveBorder: 'border-violet-400/40',
-    pillActiveBg: 'bg-violet-500/15',
-    pillActiveText: 'text-violet-100',
+    spinnerBottom: 'border-b-violet-500/25',
   },
   translating: {
     icon: Globe,
     iconColor: 'text-cyan-300',
-    titleColor: 'text-cyan-200',
-    badgeBorder: 'border-cyan-400/30',
-    badgeBg: 'bg-cyan-500/10',
-    badgeText: 'text-cyan-200',
     spinnerTop: 'border-t-cyan-400',
-    spinnerBottom: 'border-b-cyan-500/20',
-    pillActiveBorder: 'border-cyan-400/40',
-    pillActiveBg: 'bg-cyan-500/15',
-    pillActiveText: 'text-cyan-100',
+    spinnerBottom: 'border-b-cyan-500/25',
   },
-}
-
-/** 各状态的环境辉光（卡片投影） */
-const STATUS_GLOW: Record<OverlayState['status'], string> = {
-  recording: 'shadow-[0_16px_48px_-12px_rgba(244,63,94,0.4),0_4px_16px_rgba(0,0,0,0.45)]',
-  processing: 'shadow-[0_16px_48px_-12px_rgba(129,140,248,0.35),0_4px_16px_rgba(0,0,0,0.45)]',
-  success: 'shadow-[0_16px_48px_-12px_rgba(52,211,153,0.4),0_4px_16px_rgba(0,0,0,0.45)]',
-  error: 'shadow-[0_16px_48px_-12px_rgba(248,113,113,0.4),0_4px_16px_rgba(0,0,0,0.45)]',
 }
 
 function getProcessingTitle(
@@ -88,40 +63,87 @@ function getProcessingTitle(
   }
 }
 
-function getProcessingStepLabel(stage: OverlayProcessingStage, t: (key: string) => string): string {
-  switch (stage) {
-    case 'transcribing':
-      return t('hud.stepTranscribing')
-    case 'refining':
-      return t('hud.stepRefining')
-    case 'translating':
-      return t('hud.stepTranslating')
-  }
+/** 录音：琥珀色麦克风圆章，随音量呼吸缩放 + 外圈涟漪 */
+function RecordingBadge({ audioLevel }: { audioLevel: number }) {
+  const scale = 1 + Math.min(Math.max(audioLevel, 0), 1) * 0.14
+  return (
+    <span className="relative flex h-7 w-7 shrink-0 items-center justify-center">
+      <span className="absolute inset-0 animate-ping rounded-full bg-primary/25 [animation-duration:2s]" />
+      <span
+        className="relative flex h-7 w-7 items-center justify-center rounded-full bg-primary text-primary-foreground"
+        style={{
+          transform: `scale(${scale})`,
+          boxShadow: '0 0 14px -4px color-mix(in oklch, var(--primary) 75%, transparent)',
+        }}
+      >
+        <Mic className="h-3.5 w-3.5" strokeWidth={2.4} />
+      </span>
+    </span>
+  )
 }
 
-/** 小型脉冲状态点（录音/处理状态行通用） */
-function PulseDot({ className }: { className?: string }) {
+/** 处理中：细环转圈（阶段色）包住阶段小图标 */
+function ProcessingBadge({ stage }: { stage: OverlayProcessingStage | undefined }) {
+  const meta = stage ? STAGE_META[stage] : null
+  const Icon = meta?.icon ?? AudioLines
   return (
-    <span className="relative flex h-1.5 w-1.5 shrink-0">
+    <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/5">
       <span
         className={cn(
-          'absolute inline-flex h-full w-full animate-ping rounded-full opacity-70',
-          className,
+          'absolute inset-[2px] animate-spin rounded-full border-2 border-l-transparent border-r-transparent [animation-duration:1.1s]',
+          meta
+            ? [meta.spinnerTop, meta.spinnerBottom]
+            : 'border-t-indigo-400 border-b-indigo-500/25',
         )}
       />
-      <span className={cn('relative inline-flex h-1.5 w-1.5 rounded-full', className)} />
+      <Icon className={cn('h-3 w-3', meta?.iconColor ?? 'text-indigo-300')} />
+    </span>
+  )
+}
+
+/** 成功：绿色小勾圆章 */
+function SuccessBadge() {
+  return (
+    <span className="hud-pop flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-400/12 text-emerald-400 ring-1 ring-emerald-400/30 ring-inset">
+      <Check className="h-3.5 w-3.5" strokeWidth={3} />
+    </span>
+  )
+}
+
+/** 错误：红色小叉圆章 */
+function ErrorBadge() {
+  return (
+    <span className="hud-pop flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-red-500/12 text-red-400 ring-1 ring-red-400/30 ring-inset">
+      <X className="h-3.5 w-3.5" strokeWidth={2.5} />
     </span>
   )
 }
 
 export function HUD() {
   const { t } = useTranslation()
-  const [overlayState, setOverlayState] = useState<OverlayState>({ status: 'recording' })
+  const [overlayState, setOverlayState] = useState<OverlayState>({ status: 'idle' })
   const [audioLevel, setAudioLevel] = useState(0)
   const [isVisible, setIsVisible] = useState(false)
 
   // RAF cleanup ref
   const rafIdRef = useRef<number | null>(null)
+  /**
+   * 按住说话的「按下」所有权标记：只有本胶囊 pointerdown 成功发起的会话才由
+   * 本胶囊 pointerup 结束。pointerup 会从任何子元素冒泡上来，若无此标记，
+   * 取消按钮的松开或他人会话的松开会被误当成「松开说话结束」。
+   */
+  const holdActiveRef = useRef(false)
+  /** 与 overlayState 同步，但可在事件回调里同步读取（避免闭包过期）。 */
+  const statusRef = useRef<OverlayStatus>('idle')
+  /**
+   * 内容测量容器 ref：容器自身无 transform，其 rect 恒等于胶囊布局尺寸，
+   * 不受入场 / 按压缩放动画影响，供窗口缩放（setOverlaySize）使用。
+   */
+  const measureRef = useRef<HTMLDivElement | null>(null)
+  /** 测量用 rAF：同一帧内多次重渲染只测一次。 */
+  const measureRafRef = useRef<number | null>(null)
+  /** 上次已下发的窗口尺寸，尺寸未变不重复 invoke（录音电平帧高频重渲染）。 */
+  const lastOverlaySizeRef = useRef<{ width: number; height: number } | null>(null)
 
   useEffect(() => {
     document.documentElement.classList.add('overlay-html')
@@ -129,6 +151,9 @@ export function HUD() {
     return () => {
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current)
+      }
+      if (measureRafRef.current !== null) {
+        cancelAnimationFrame(measureRafRef.current)
       }
       document.documentElement.classList.remove('overlay-html')
     }
@@ -151,270 +176,209 @@ export function HUD() {
     }
   }, [])
 
+  useEffect(() => {
+    statusRef.current = overlayState.status
+    // 窗口已缩到内容大小（见 scheduleOverlayResize），整窗即胶囊、无死区，所有
+    // 状态保持可点击（待机 = 按住说话，录音 / 处理 = 取消按钮）。不做 hover 穿透：
+    // Tauri `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，一旦
+    // 穿透 mouseenter 不再可达，胶囊（含取消按钮）会永久点不到。
+    window.electronAPI.setIgnoreMouseEvents(false)
+  }, [overlayState.status])
+
+  /**
+   * 状态 / 文案变化后测量胶囊实际内容尺寸，把 overlay 窗口缩到内容大小
+   * （每侧 2px 内边距；Rust `set_overlay_size` 钳制尺寸合法性并保持底部居中）。
+   * 在 rAF 中取 `getBoundingClientRect` 等布局落定；测量容器自身无 transform，
+   * 故 rect 不受入场 / 按压缩放动画干扰。尺寸不变则去重、不重复 invoke。
+   */
+  const scheduleOverlayResize = useCallback(() => {
+    if (measureRafRef.current !== null) return
+    measureRafRef.current = requestAnimationFrame(() => {
+      measureRafRef.current = null
+      const el = measureRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      const width = Math.ceil(rect.width) + OVERLAY_PADDING_PX * 2
+      const height = Math.ceil(rect.height) + OVERLAY_PADDING_PX * 2
+      if (width <= 0 || height <= 0) return
+      const last = lastOverlaySizeRef.current
+      if (last && last.width === width && last.height === height) return
+      lastOverlaySizeRef.current = { width, height }
+      window.electronAPI.setOverlaySize(width, height).catch(() => {
+        // 下发失败：清掉去重缓存，下次渲染重试
+        lastOverlaySizeRef.current = null
+      })
+    })
+  }, [])
+
+  // 每次渲染后测量并按需缩放：覆盖状态切换与文案长度变化（如 success 预览变长）。
+  useEffect(() => {
+    scheduleOverlayResize()
+  })
+
+  /** pointerdown：按住说话（左键 / 中键）。语义与 PTT 心智一致，绝不做切换。 */
+  const handleHoldStart = (event: ReactPointerEvent) => {
+    if (event.button !== 0 && event.button !== 1) return
+    // 仅待机态由胶囊发起会话；录音 / 处理态的按下交给各自按钮（如取消），
+    // 防止「点取消 → 误开始」。
+    if (statusRef.current !== 'idle') return
+    if (holdActiveRef.current) return
+    holdActiveRef.current = true
+    window.electronAPI.startSession().catch(() => {
+      holdActiveRef.current = false
+    })
+  }
+
+  /** pointerup / pointercancel / pointerleave：只结束本胶囊发起的会话。 */
+  const handleHoldEnd = () => {
+    if (!holdActiveRef.current) return
+    holdActiveRef.current = false
+    window.electronAPI.stopSession().catch(() => {})
+  }
+
   const handleCancel = () => {
     window.electronAPI.cancelSession()
   }
 
-  const { status, message, processingStage, processingTotalStages, transcript = '' } = overlayState
+  const { status, message, processingStage, transcript = '' } = overlayState
   const transcriptCharacters = Array.from(transcript)
-  const unstableTailLength = status === 'recording' ? Math.min(6, transcriptCharacters.length) : 0
+  const unstableTailLength =
+    status === 'recording' || status === 'processing' ? Math.min(6, transcriptCharacters.length) : 0
   const stableTranscript = transcriptCharacters
     .slice(0, transcriptCharacters.length - unstableTailLength)
     .join('')
   const unstableTranscript = transcriptCharacters.slice(-unstableTailLength).join('')
 
-  const showDetailedProcessing = status === 'processing' && Boolean(processingStage)
-  const visibleProcessingSteps = useMemo(
-    () => (processingTotalStages === 1 ? PROCESSING_STEPS.slice(0, 1) : PROCESSING_STEPS),
-    [processingTotalStages],
-  )
-  const currentProcessingIndex = processingStage ? PROCESSING_STEPS.indexOf(processingStage) : -1
-
-  const meta = processingStage ? STAGE_META[processingStage] : null
-  const showStepPills = showDetailedProcessing && !transcript
+  // 取消按钮只在会话进行中（录音 / 处理）有意义；成功与错误态把宽度让给文案。
+  const showCancel = status === 'recording' || status === 'processing'
+  const textClass = 'min-w-0 flex-1 truncate text-[13px] leading-4 text-neutral-100'
 
   return (
-    <div className="pointer-events-none fixed inset-0 flex items-center justify-center">
-      <div
-        className={cn(
-          'pointer-events-auto relative flex min-h-[92px] w-[400px] items-start gap-3 rounded-2xl p-3.5 backdrop-blur-2xl',
-          'transition-all duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]',
-          STATUS_GLOW[status],
-          isVisible
-            ? 'translate-y-0 scale-100 opacity-100 blur-0'
-            : 'translate-y-3 scale-[0.96] opacity-0 blur-sm',
-        )}
-        style={{
-          background:
-            'linear-gradient(rgba(16,16,18,0.86), rgba(16,16,18,0.86)) padding-box, linear-gradient(140deg, rgba(255,255,255,0.16), rgba(255,255,255,0.05) 45%, rgba(255,255,255,0.02)) border-box',
-          border: '1px solid transparent',
-        }}
-        onMouseEnter={() => window.electronAPI.setIgnoreMouseEvents(false)}
-        onMouseLeave={() => window.electronAPI.setIgnoreMouseEvents(true)}
-      >
-        {/* Left status icon */}
-        <div className="relative mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center">
-          {status === 'recording' && (
-            <>
-              {/* 双层涟漪光环 */}
-              <span className="absolute inset-0 animate-ping rounded-full bg-red-500/30 [animation-duration:1.8s]" />
-              <span className="absolute inset-0 animate-ping rounded-full bg-orange-400/20 [animation-delay:600ms] [animation-duration:1.8s]" />
-              {/* 随音量呼吸缩放 */}
-              <div
-                className="relative flex h-9 w-9 items-center justify-center rounded-full bg-linear-to-br from-red-500 to-orange-500 text-white shadow-lg shadow-red-500/30 transition-transform duration-150 ease-out"
-                style={{ transform: `scale(${1 + Math.min(audioLevel, 1) * 0.18})` }}
-              >
-                <Mic className="h-4 w-4" strokeWidth={2.2} />
-              </div>
-            </>
-          )}
+    <div
+      className="pointer-events-none fixed inset-0 flex items-center justify-center"
+      onPointerUp={handleHoldEnd}
+      onPointerCancel={handleHoldEnd}
+    >
+      {/* 测量容器：无自身 transform，rect 恒等于胶囊布局尺寸，供窗口缩放 */}
+      <div ref={measureRef} className="flex shrink-0">
+        {status === 'idle' ? (
+          // 待机态：小尺寸低调胶囊，点击 = 按住说话（pointerdown/up 语义，不做切换）
+          <button
+            type="button"
+            className={cn(
+              'pointer-events-auto flex h-9 select-none items-center gap-2 rounded-full',
+              'border border-white/10 bg-neutral-950/70 px-3.5 backdrop-blur-xl touch-none',
+              'shadow-[0_12px_32px_-12px_rgba(0,0,0,0.65)]',
+              'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-95',
+              isVisible
+                ? 'translate-y-0 scale-100 opacity-100 blur-0'
+                : 'translate-y-2 scale-95 opacity-0 blur-sm',
+            )}
+            onPointerDown={handleHoldStart}
+            onPointerUp={handleHoldEnd}
+            onPointerCancel={handleHoldEnd}
+            onPointerLeave={handleHoldEnd}
+            onContextMenu={(event) => event.preventDefault()}
+            title={t('hud.holdToTalk')}
+            aria-label={t('hud.holdToTalk')}
+          >
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/10 text-neutral-300">
+              <Mic className="h-3 w-3" />
+            </span>
+            <span className="text-xs font-medium text-neutral-200">{t('hud.holdToTalk')}</span>
+          </button>
+        ) : (
+          <div
+            className={cn(
+              'pointer-events-auto relative flex h-[52px] w-[268px] items-center gap-2.5 rounded-full',
+              'border border-white/10 bg-neutral-950/85 px-3 backdrop-blur-xl',
+              'shadow-[0_12px_32px_-12px_rgba(0,0,0,0.65),0_4px_10px_-4px_rgba(0,0,0,0.4)]',
+              'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]',
+              isVisible
+                ? 'translate-y-0 scale-100 opacity-100 blur-0'
+                : 'translate-y-2 scale-95 opacity-0 blur-sm',
+            )}
+            onPointerUp={handleHoldEnd}
+            onPointerCancel={handleHoldEnd}
+            onPointerLeave={handleHoldEnd}
+          >
+            {/* Left status badge */}
+            {status === 'recording' && <RecordingBadge audioLevel={audioLevel} />}
+            {status === 'processing' && <ProcessingBadge stage={processingStage} />}
+            {status === 'success' && <SuccessBadge />}
+            {status === 'error' && <ErrorBadge />}
 
-          {status === 'processing' && (
-            <div className="relative flex h-9 w-9 items-center justify-center rounded-full border border-white/8 bg-white/5">
-              <div
-                className={cn(
-                  'absolute inset-[3px] animate-spin rounded-full border-2 border-l-transparent border-r-transparent [animation-duration:1.2s]',
-                  meta
-                    ? [meta.spinnerBottom, meta.spinnerTop]
-                    : 'border-b-indigo-500/20 border-t-indigo-400',
-                )}
-              />
-              {meta ? (
-                <meta.icon className={cn('h-3.5 w-3.5', meta.iconColor)} />
-              ) : (
-                <Zap className="h-3.5 w-3.5 text-indigo-300" fill="currentColor" />
-              )}
-            </div>
-          )}
-
-          {status === 'success' && (
-            <div className="hud-pop flex h-9 w-9 items-center justify-center rounded-full bg-linear-to-br from-emerald-400 to-teal-500 text-white shadow-lg shadow-emerald-500/30">
-              <Check className="h-4 w-4" strokeWidth={3} />
-            </div>
-          )}
-
-          {status === 'error' && (
-            <div className="hud-pop flex h-9 w-9 items-center justify-center rounded-full border border-red-400/25 bg-red-500/10 text-red-400">
-              <X className="h-4 w-4" strokeWidth={2.5} />
-            </div>
-          )}
-        </div>
-
-        {/* Center content */}
-        <div className="flex min-h-[64px] min-w-0 flex-1 flex-col justify-center overflow-hidden pr-1">
-          {status === 'recording' &&
-            (transcript ? (
-              /* 流式识别：实时文本为主视觉 */
-              <div className="flex min-w-0 flex-col gap-2">
-                <p className="line-clamp-3 text-[14px] leading-5 text-neutral-100">
+            {/* Single-line status text */}
+            {status === 'recording' &&
+              (transcript ? (
+                /* 流式识别：实时文本单行截断，尾部弱化 + 呼吸光标 */
+                <p className={cn(textClass, 'font-normal')} title={transcript}>
                   <span>{stableTranscript}</span>
                   <span className="text-neutral-500">{unstableTranscript}</span>
-                  <span className="hud-caret ml-[3px] inline-block h-[14px] w-[2px] translate-y-[2px] rounded-full bg-linear-to-b from-orange-400 to-red-500" />
+                  <span className="hud-caret ml-[2px] inline-block h-[13px] w-[2px] translate-y-[2px] rounded-full bg-primary" />
                 </p>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="flex items-center gap-1.5 text-[10px] font-medium text-neutral-400">
-                    <PulseDot className="bg-red-400" />
+              ) : (
+                /* 无流式文本：状态词 + 迷你波形 */
+                <div className="flex min-w-0 flex-1 items-center justify-between gap-2">
+                  <span className="truncate text-[13px] font-medium text-neutral-200">
                     {t('hud.listening')}
                   </span>
                   <Waveform
                     audioLevel={audioLevel}
-                    barCount={14}
-                    className="h-3.5 w-20 gap-[2px]"
-                    barClassName="w-[2px] bg-linear-to-t from-red-500/70 to-orange-300/70"
+                    barCount={7}
+                    className="h-4 w-[26px] shrink-0 gap-[2px]"
+                    barClassName="w-[2px] bg-linear-to-t from-primary/40 to-primary"
                   />
                 </div>
-              </div>
-            ) : (
-              /* 非流式（SenseVoice）：波形为主视觉 */
-              <div className="flex w-full flex-col gap-1.5">
-                <span className="flex items-center gap-1.5 text-[11px] font-medium text-neutral-400">
-                  <PulseDot className="bg-red-400" />
-                  {t('hud.listening')}
-                </span>
-                <Waveform
-                  audioLevel={audioLevel}
-                  barCount={28}
-                  className="h-7"
-                  barClassName="bg-linear-to-t from-red-500 to-orange-400"
-                />
-              </div>
-            ))}
+              ))}
 
-          {status === 'processing' &&
-            (transcript ? (
-              /* 展示已识别文本 + 当前阶段 */
-              <div className="flex min-w-0 flex-col gap-2">
-                <p className="line-clamp-3 text-[14px] leading-5 text-neutral-100">{transcript}</p>
-                <span
-                  className={cn(
-                    'flex items-center gap-1.5 text-[10px] font-medium',
-                    meta?.titleColor ?? 'text-indigo-200',
-                  )}
+            {status === 'processing' &&
+              (transcript ? (
+                /* 流式识别增量：与录音分支同款单行截断 + 尾部弱化 + 光标 */
+                <p className={cn(textClass, 'font-normal')} title={transcript}>
+                  <span>{stableTranscript}</span>
+                  <span className="text-neutral-500">{unstableTranscript}</span>
+                  <span className="hud-caret ml-[2px] inline-block h-[13px] w-[2px] translate-y-[2px] rounded-full bg-primary" />
+                </p>
+              ) : (
+                <p
+                  className={cn(textClass, 'font-medium')}
+                  title={getProcessingTitle(processingStage, t)}
                 >
-                  <PulseDot
-                    className={cn(
-                      processingStage === 'refining' && 'bg-violet-400',
-                      processingStage === 'translating' && 'bg-cyan-400',
-                      processingStage === 'transcribing' && 'bg-indigo-400',
-                      !processingStage && 'bg-indigo-400',
-                    )}
-                  />
                   {getProcessingTitle(processingStage, t)}
-                </span>
-              </div>
-            ) : showStepPills ? (
-              <div className="flex w-full flex-col gap-1.5 px-1">
-                {/* Title row */}
-                <div className="flex items-center justify-between gap-2">
-                  <span
-                    className={cn(
-                      'text-sm font-medium transition-colors duration-300',
-                      meta?.titleColor ?? 'text-white',
-                    )}
-                  >
-                    {getProcessingTitle(processingStage, t)}
-                  </span>
-                  {processingTotalStages === 2 &&
-                    currentProcessingIndex >= 0 &&
-                    processingStage !== 'translating' && (
-                      <span
-                        className={cn(
-                          'rounded-full border px-1.5 py-0.5 text-[10px] font-medium tabular-nums transition-colors duration-300',
-                          meta
-                            ? [meta.badgeBorder, meta.badgeBg, meta.badgeText]
-                            : 'border-indigo-400/30 bg-indigo-500/10 text-indigo-200',
-                        )}
-                      >
-                        {currentProcessingIndex + 1}/2
-                      </span>
-                    )}
-                </div>
+                </p>
+              ))}
 
-                {/* Step pills */}
-                <div className="flex items-center gap-1.5">
-                  {(processingStage === 'translating'
-                    ? (['translating'] as OverlayProcessingStage[])
-                    : visibleProcessingSteps
-                  ).map((step, index) => {
-                    const isCurrent = step === processingStage
-                    const isCompleted = currentProcessingIndex > index
-                    const stepMeta = STAGE_META[step]
+            {status === 'success' && (
+              <p className={textClass} title={transcript || undefined}>
+                {transcript || t('hud.injected')}
+              </p>
+            )}
 
-                    return (
-                      <div key={step} className="flex flex-1 items-center gap-1.5">
-                        {index > 0 && (
-                          <div
-                            className={cn(
-                              'h-px w-2 shrink-0 transition-colors duration-300',
-                              currentProcessingIndex >= index ? 'bg-white/25' : 'bg-white/8',
-                            )}
-                          />
-                        )}
-                        <div
-                          className={cn(
-                            'relative flex flex-1 items-center justify-center gap-1 overflow-hidden rounded-full border px-2 py-1 text-center text-[10px] font-medium transition-colors duration-300',
-                            isCurrent && [
-                              stepMeta.pillActiveBorder,
-                              stepMeta.pillActiveBg,
-                              stepMeta.pillActiveText,
-                            ],
-                            isCompleted && 'border-white/10 bg-white/10 text-white/80',
-                            !isCurrent &&
-                              !isCompleted &&
-                              'border-white/6 bg-white/[0.03] text-neutral-500',
-                          )}
-                        >
-                          {isCurrent && (
-                            <span className="hud-shimmer pointer-events-none absolute inset-0" />
-                          )}
-                          {isCompleted && (
-                            <Check className="h-2.5 w-2.5 shrink-0" strokeWidth={3} />
-                          )}
-                          <span className="relative">{getProcessingStepLabel(step, t)}</span>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            ) : (
-              <div className="flex w-full items-center gap-2 px-1">
-                <PulseDot className="bg-indigo-400" />
-                <span className="animate-pulse text-sm font-medium text-white">
-                  {t('hud.thinking')}
-                </span>
-              </div>
-            ))}
-
-          {status === 'success' && (
-            <div className="flex w-full items-center gap-2">
-              <span className="hud-pop flex h-5 w-5 items-center justify-center rounded-full bg-emerald-400/10 text-emerald-400 ring-1 ring-emerald-400/30">
-                <Sparkles className="h-3 w-3" />
-              </span>
-              <span className="text-sm font-medium text-emerald-300">{t('hud.injected')}</span>
-            </div>
-          )}
-
-          {status === 'error' && (
-            <div className="flex flex-col gap-0.5 px-1">
-              <span className="line-clamp-1 text-sm font-medium text-red-400">
-                {t('hud.error')}
-              </span>
-              <span className="line-clamp-1 max-w-[240px] text-xs text-neutral-500" title={message}>
+            {status === 'error' && (
+              <p className={cn(textClass, 'text-neutral-200')} title={message}>
                 {message || t('hud.errorFallback')}
-              </span>
-            </div>
-          )}
-        </div>
+              </p>
+            )}
 
-        {/* Cancel button */}
-        <button
-          onClick={handleCancel}
-          className="mt-0.5 flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-full text-neutral-500 transition-all duration-150 hover:bg-white/10 hover:text-neutral-200 active:scale-90"
-          title={t('hud.cancel')}
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
+            {/* Cancel button */}
+            {showCancel && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                /* 与按住说话互斥：取消按钮的按下 / 松开不得触发 start / stop */
+                onPointerDown={(event) => event.stopPropagation()}
+                onPointerUp={(event) => event.stopPropagation()}
+                onPointerCancel={(event) => event.stopPropagation()}
+                className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-full text-neutral-500 transition-colors duration-150 hover:bg-white/10 hover:text-neutral-200 active:scale-90"
+                title={t('hud.cancel')}
+                aria-label={t('hud.cancel')}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

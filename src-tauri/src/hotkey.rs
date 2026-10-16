@@ -124,12 +124,20 @@ fn char_key_code(name: &str) -> Option<Code> {
 }
 
 /// Map a lone modifier token to its physical key so a bare `Control` / `Shift` /
-/// `Command` / `Alt` can be registered as a push-to-talk key.
+/// `Command` / `Alt` (and their right-side variants) can be registered as a
+/// push-to-talk key.
+///
+/// Token strings are matched case-insensitively against the renderer's
+/// `normalizeKey` output (`Alt` / `AltRight` / `Control` / `ControlRight` /
+/// `Shift` / `ShiftRight` / `Command`); keep both sides literally aligned.
 fn bare_modifier_code(name: &str) -> Option<Code> {
     Some(match name.to_ascii_lowercase().as_str() {
         "control" | "ctrl" => Code::ControlLeft,
+        "controlright" => Code::ControlRight,
         "shift" => Code::ShiftLeft,
+        "shiftright" => Code::ShiftRight,
         "alt" | "option" => Code::AltLeft,
+        "altright" => Code::AltRight,
         "super" | "meta" | "cmd" | "command" => Code::Super,
         _ => return None,
     })
@@ -154,8 +162,14 @@ fn parse_accelerator(accelerator: &str) -> Option<Shortcut> {
             continue;
         }
         match p.to_ascii_lowercase().as_str() {
-            "control" | "ctrl" | "commandorcontrol" | "cmdorctrl" => mods |= Modifiers::CONTROL,
-            "shift" => mods |= Modifiers::SHIFT,
+            // Right-side modifiers collapse into the same Modifiers flags in
+            // combinations: Tauri `Modifiers` has no left/right distinction.
+            // (Bare right modifiers are resolved by `bare_modifier_code` above.)
+            "control" | "ctrl" | "commandorcontrol" | "cmdorctrl" | "controlright" => {
+                mods |= Modifiers::CONTROL
+            }
+            "shift" | "shiftright" => mods |= Modifiers::SHIFT,
+            "altright" => mods |= Modifiers::ALT,
             "alt" | "option" => {
                 // Inside this loop the accelerator always contains a "+", so Alt/Option acts
                 // as a modifier here; a lone Alt is resolved by `bare_modifier_code`.
@@ -264,6 +278,26 @@ pub fn rebind<R: Runtime>(app: &AppHandle<R>, hotkeys: &HotkeyConfig) -> Result<
     }
 }
 
+/// While the settings hotkey recorder is capturing keystrokes, global hotkey
+/// presses must not fire actions: the combos being recorded would otherwise
+/// start a recording or trigger translation.
+fn hotkey_capture_active<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<crate::state::AppState>()
+        .map(|s| s.hotkey_capture_active())
+        .unwrap_or(false)
+}
+
+/// True when the user is inside the app (main window focused). Push-to-talk is
+/// app-external only, so PTT presses are ignored while the settings UI is up.
+/// The main window may have been destroyed by the delayed reclaim, in which
+/// case there is nothing focused and the hotkey must keep working.
+/// Shared with the middle-button PTT guard (`mouse.rs`).
+pub fn main_window_focused<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false)
+}
+
 fn bind_one<R: Runtime>(app: &AppHandle<R>, accelerator: &str, action: &str) -> Result<(), String> {
     let shortcut = parse_accelerator(accelerator)
         .ok_or_else(|| format!("Unsupported accelerator: {accelerator}"))?;
@@ -276,6 +310,12 @@ fn bind_one<R: Runtime>(app: &AppHandle<R>, accelerator: &str, action: &str) -> 
                 "ptt" => {
                     // Push-to-talk: press starts, release stops and transcribes.
                     if event.state() == ShortcutState::Pressed {
+                        // Never start recording while the user is inside the app
+                        // (main window focused) or while the settings hotkey
+                        // recorder is capturing keystrokes: PTT is app-external only.
+                        if hotkey_capture_active(app) || main_window_focused(app) {
+                            return;
+                        }
                         let state = app.state::<crate::state::AppState>();
                         let recording = state
                             .session
@@ -286,6 +326,12 @@ fn bind_one<R: Runtime>(app: &AppHandle<R>, accelerator: &str, action: &str) -> 
                             let _ = crate::commands::start_session_internal(app);
                         }
                     } else if event.state() == ShortcutState::Released {
+                        // Release is never suppressed: if a session is already
+                        // running (e.g. PTT was pressed outside the app and
+                        // released after focus came back, or capture started
+                        // mid-press) it must always be stopped and transcribed,
+                        // otherwise the recording would hang forever. With no
+                        // active session this is a no-op.
                         let state = app.state::<crate::state::AppState>();
                         let recording = state
                             .session
@@ -314,20 +360,30 @@ fn bind_one<R: Runtime>(app: &AppHandle<R>, accelerator: &str, action: &str) -> 
                 }
                 "settings" => {
                     if event.state() == ShortcutState::Pressed {
-                        if let Some(win) = handle.get_webview_window("main") {
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        }
+                        // Rebuilds the main window if the delayed destroy
+                        // reclaimed it (windowing::ensure_main_window).
+                        crate::windowing::open_main_window(&handle);
                     }
                 }
                 "translate" => {
                     if event.state() == ShortcutState::Pressed {
-                        let _ = handle.emit(
-                            "translate",
-                            HotkeyEvent {
-                                action: "translate".into(),
-                            },
-                        );
+                        // The settings hotkey recorder owns the keyboard while
+                        // capturing; the settings window itself is no
+                        // translation target either (same app-external posture
+                        // as PTT) — never fire translation from those
+                        // keystrokes.
+                        if hotkey_capture_active(app) || main_window_focused(app) {
+                            return;
+                        }
+                        // Capture -> LLM -> paste can take up to a minute; run
+                        // it on the async runtime (mirrors the PTT release ->
+                        // stop_session spawn) so the shortcut handler never
+                        // blocks. `translate::translate_selection` surfaces
+                        // every failure itself (error toast + HUD capsule).
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            crate::translate::translate_selection(&handle).await;
+                        });
                     }
                 }
                 _ => {}

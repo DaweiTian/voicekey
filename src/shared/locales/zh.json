@@ -191,6 +191,12 @@
     "durationWarning": "单次录音最长 5 分钟。",
     "lowVolumeMode": "低音量模式",
     "lowVolumeModeHelp": "适合相对安静的咖啡店或办公室，想轻声语音输入时使用。会放大说话声，也可能放大环境噪音。",
+    "mouse": {
+      "title": "鼠标触发",
+      "description": "用鼠标快捷方式开始录音（仅 Windows）",
+      "middleClickPtt": "中键按住说话（Push-to-Talk）",
+      "middleClickPttHelp": "开启后按下鼠标中键开始录音，松开停止并发送。注意：本功能不吞按键，依赖中键的应用（如部分终端的中键粘贴）仍会收到点击，可能与录音同时发生。"
+    },
     "microphone": {
       "label": "麦克风",
       "placeholder": "选择麦克风",
@@ -386,6 +392,7 @@
   "hud": {
     "finish": "完成",
     "cancel": "取消",
+    "holdToTalk": "按住说话",
     "listening": "正在听",
     "thinking": "处理中...",
     "transcribing": "识别中",
@@ -406,6 +413,7 @@
   },
   "tray": {
     "settings": "设置",
+    "overlayToggle": "显示悬浮胶囊",
     "quit": "退出",
     "tooltip": "Voice Key"
   },

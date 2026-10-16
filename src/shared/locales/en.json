@@ -191,6 +191,12 @@
     "durationWarning": "Each recording can last up to 5 minutes.",
     "lowVolumeMode": "Low-volume mode",
     "lowVolumeModeHelp": "For speaking softly in a relatively quiet café or office. Boosts your voice, but may also boost background noise.",
+    "mouse": {
+      "title": "Mouse triggers",
+      "description": "Start recording with the mouse (Windows only)",
+      "middleClickPtt": "Middle-click push-to-talk",
+      "middleClickPttHelp": "When on, hold the middle mouse button to record; release to stop and send. The click is never swallowed: apps that use the middle button (e.g. terminal paste) still receive it, so both may happen at once."
+    },
     "microphone": {
       "label": "Microphone",
       "placeholder": "Select microphone",
@@ -386,6 +392,7 @@
   "hud": {
     "finish": "Finish",
     "cancel": "Cancel",
+    "holdToTalk": "Hold to talk",
     "listening": "Listening",
     "thinking": "Thinking...",
     "transcribing": "Transcribing",
@@ -406,6 +413,7 @@
   },
   "tray": {
     "settings": "Settings",
+    "overlayToggle": "Show floating capsule",
     "quit": "Quit",
     "tooltip": "Voice Key"
   },

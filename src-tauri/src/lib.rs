@@ -6,10 +6,14 @@ mod history;
 mod hotkey;
 mod inject;
 mod llm;
+mod mouse;
 mod platform;
 mod state;
+mod stats;
+mod translate;
 mod tray;
 mod updater;
+mod windowing;
 
 use state::AppState;
 use tauri::Manager;
@@ -23,6 +27,23 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        // Launch-at-login; toggled from the tray menu's checkable item (tray.rs).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .on_window_event(|window, event| {
+            // Closing the main window hides it to the tray and arms a 5-minute
+            // delayed destroy of its WebView (`windowing`); reopening rebuilds
+            // the window on demand. The tray "Quit" item (`app.exit`) remains
+            // the only real exit path.
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    windowing::hide_main_window_to_tray(window.app_handle());
+                }
+            }
+        })
         .setup(|app| {
             let state = AppState::new(app.handle())?;
             app.manage(state);
@@ -33,11 +54,27 @@ pub fn run() {
 
             tray::setup_tray(app.handle())?;
             hotkey::bind_default_hotkeys(app.handle())?;
+            // Best-effort first pass of the Windows focus-frame hardening (main
+            // window: border only; overlay: no-activate + no border). Anything
+            // missing here is covered by the per-show re-application in
+            // `overlay_show` / `windowing::ensure_main_window`.
+            windowing::harden_app_windows(app.handle());
+            // Middle mouse button push-to-talk (Windows only; no-op elsewhere).
+            // The hook installs / removes itself as the setting flips.
+            mouse::init(app.handle());
+            mouse::set_middle_click_ptt(
+                app.state::<AppState>().config.load().mouse.middle_click_ptt,
+            );
+            // The HUD capsule is an always-on standby launcher now. The show
+            // path re-applies the Windows hardening around `show()` and honors
+            // the tray "hide floating capsule" toggle.
+            commands::show_overlay_idle(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_config,
             commands::set_config,
+            commands::set_hotkey_capture_active,
             commands::get_config_secret,
             commands::test_refine_connection,
             commands::connect_token_dance,
@@ -52,6 +89,7 @@ pub fn run() {
             commands::get_app_language,
             commands::set_app_language,
             commands::get_history,
+            commands::get_stats,
             commands::clear_history,
             commands::delete_history_item,
             commands::start_session,
@@ -74,6 +112,7 @@ pub fn run() {
             commands::install_linux_integration,
             commands::remove_linux_integration,
             commands::set_ignore_mouse_events,
+            commands::set_overlay_size,
             commands::show_settings_window,
             commands::refine_text,
             commands::translate_text,

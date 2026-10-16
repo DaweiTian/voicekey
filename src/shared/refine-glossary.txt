@@ -1,0 +1,23 @@
+# Voice Key refine glossary
+System Prompt
+Anthropic
+Claude
+Claude Code
+Opus
+Claude Opus
+Sonnet
+Claude Sonnet
+OpenAI
+ChatGPT
+OpenClaw
+Gemini
+Harness
+Harness Engineering
+Pi Agent
+Qwen
+Llama
+cursor
+Kimi
+DeepSeeK
+MiniMax
+Voice Key

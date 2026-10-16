@@ -10,6 +10,11 @@ pub const HISTORY_RETENTION_DAYS: i64 = 90;
 pub struct AppPreferences {
     pub language: String,
     pub auto_launch: bool,
+    /// Whether the always-on HUD capsule is visible. Toggled from the tray
+    /// menu ("Show floating capsule"); a hidden capsule stays hidden even when
+    /// a session starts. Defaults to visible.
+    #[serde(default = "default_true")]
+    pub overlay_visible: bool,
 }
 
 impl Default for AppPreferences {
@@ -17,8 +22,21 @@ impl Default for AppPreferences {
         Self {
             language: "system".into(),
             auto_launch: false,
+            overlay_visible: true,
         }
     }
+}
+
+/// Mouse-based session triggers. `middle_click_ptt` is Windows-only at the
+/// implementation level (`src-tauri/src/mouse.rs`); the flag is stored on all
+/// platforms so switching machines never loses the preference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MouseConfig {
+    /// Middle mouse button acts as push-to-talk: press starts, release stops.
+    /// Off by default because some apps (terminals) use middle-click to paste
+    /// and the hook deliberately never swallows the click.
+    pub middle_click_ptt: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -185,6 +203,8 @@ pub struct AppConfig {
     pub llm_refine: LLMRefineConfig,
     pub hotkey: HotkeyConfig,
     pub translation: TranslationConfig,
+    #[serde(default)]
+    pub mouse: MouseConfig,
 }
 
 impl Default for AppConfig {
@@ -195,6 +215,7 @@ impl Default for AppConfig {
             llm_refine: LLMRefineConfig::default(),
             hotkey: HotkeyConfig::default(),
             translation: TranslationConfig::default(),
+            mouse: MouseConfig::default(),
         }
     }
 }
@@ -221,6 +242,12 @@ pub fn config_file() -> PathBuf {
 
 pub fn history_file() -> PathBuf {
     config_dir().join("voice-key-history.json")
+}
+
+/// Lifetime stats store, independent from history so history deletion or the
+/// 90-day retention prune never resets cumulative figures.
+pub fn stats_file() -> PathBuf {
+    config_dir().join("voice-key-stats.json")
 }
 
 pub fn log_dir() -> PathBuf {
@@ -302,14 +329,19 @@ impl ConfigStore {
         let mut merged = stored.clone();
 
         if let Some(app) = partial.get("app") {
-            if let Ok(patch) = serde_json::from_value::<AppPreferences>(app.clone()) {
-                merged.app = patch;
-            } else if let Some(obj) = app.as_object() {
+            // Merge field-by-field (same rationale as `asr` below): patching
+            // `language` alone must never reset `overlayVisible`, which is owned
+            // by the tray menu and may legitimately differ from the renderer's
+            // snapshot. An explicit value always wins; absent keys keep stored.
+            if let Some(obj) = app.as_object() {
                 if let Some(v) = obj.get("language").and_then(|v| v.as_str()) {
                     merged.app.language = v.to_string();
                 }
                 if let Some(v) = obj.get("autoLaunch").and_then(|v| v.as_bool()) {
                     merged.app.auto_launch = v;
+                }
+                if let Some(v) = obj.get("overlayVisible").and_then(|v| v.as_bool()) {
+                    merged.app.overlay_visible = v;
                 }
             }
         }
@@ -449,6 +481,12 @@ impl ConfigStore {
             }
             if let Some(v) = translation.get("targetLanguage").and_then(|v| v.as_str()) {
                 merged.translation.target_language = v.to_string();
+            }
+        }
+
+        if let Some(mouse) = partial.get("mouse") {
+            if let Some(v) = mouse.get("middleClickPtt").and_then(|v| v.as_bool()) {
+                merged.mouse.middle_click_ptt = v;
             }
         }
 

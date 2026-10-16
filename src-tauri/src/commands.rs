@@ -9,12 +9,15 @@ use crate::inject;
 use crate::llm;
 use crate::platform;
 use crate::state::AppState;
+use crate::stats::{StatsManager, StatsStore};
 use crate::updater;
 use crate::updater::UpdateInfo;
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, State, WebviewWindow,
+};
 
 fn only_main_window(window: &WebviewWindow, action: &str) -> Result<(), String> {
     if window.label() == "main" {
@@ -50,25 +53,162 @@ fn mimo_asr_credentials(config: &AppConfig) -> (String, String, String) {
     (key, base, model)
 }
 
-/// Show the HUD overlay window (recording / processing feedback).
-fn overlay_show<R: tauri::Runtime>(app: &AppHandle<R>) {
-    if let Some(win) = app.get_webview_window("overlay") {
-        let _ = win.show();
+/// Gap between the HUD's bottom edge and the bottom of the work area
+/// (i.e. above the taskbar), in logical pixels.
+const OVERLAY_BOTTOM_MARGIN: f64 = 48.0;
+
+/// Fallback HUD size (logical px) when the window reports no size.
+/// Keep in sync with the `overlay` entry in `tauri.conf.json`.
+const OVERLAY_FALLBACK_SIZE: (f64, f64) = (280.0, 64.0);
+
+/// Bounds for `set_overlay_size` (logical px). Clamped so a buggy or hostile
+/// renderer value can never produce a tiny unusable or huge invisible capsule.
+const OVERLAY_MIN_SIZE: (u32, u32) = (40, 32); // (width, height)
+const OVERLAY_MAX_SIZE: (u32, u32) = (400, 120);
+
+/// Work area (physical px) of `monitor`: origin + size, excluding the
+/// taskbar / dock whenever the platform reports one.
+fn monitor_work_area(monitor: &Monitor) -> (f64, f64, f64, f64) {
+    let work = monitor.work_area();
+    if work.size.width > 0 && work.size.height > 0 {
+        (
+            work.position.x as f64,
+            work.position.y as f64,
+            work.size.width as f64,
+            work.size.height as f64,
+        )
+    } else {
+        let position = monitor.position();
+        let size = monitor.size();
+        (
+            position.x as f64,
+            position.y as f64,
+            size.width as f64,
+            size.height as f64,
+        )
     }
 }
 
-/// Hide the HUD overlay window immediately.
+/// Place the HUD horizontally centered on the monitor that contains the
+/// cursor, near the bottom of that monitor's work area, above the taskbar.
+/// All values are physical desktop pixels, taken from the same monitor, so
+/// the math is multi-monitor and DPI safe.
+fn position_overlay_bottom_center<R: tauri::Runtime>(app: &AppHandle<R>, win: &WebviewWindow<R>) {
+    // `cursor_position` and monitor rects are both physical (device) pixels on
+    // the desktop virtual screen, so they can be compared directly. The cursor
+    // only selects the target monitor; the HUD itself no longer follows it.
+    let Ok(cursor) = app.cursor_position() else {
+        return;
+    };
+    let monitor = app
+        .monitor_from_point(cursor.x, cursor.y)
+        .ok()
+        .flatten()
+        .or_else(|| win.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(monitor) = monitor else {
+        return;
+    };
+
+    let monitor_scale = monitor.scale_factor();
+    // The window is configured in logical pixels, so its logical size stays
+    // constant; convert it to the physical size it has on `monitor`.
+    let window_scale = win.scale_factor().unwrap_or(monitor_scale);
+    let (logical_w, logical_h) = win
+        .inner_size()
+        .map(|size| {
+            (
+                size.width as f64 / window_scale,
+                size.height as f64 / window_scale,
+            )
+        })
+        .unwrap_or(OVERLAY_FALLBACK_SIZE);
+    let window_w = logical_w * monitor_scale;
+    let window_h = logical_h * monitor_scale;
+
+    let (area_x, area_y, area_w, area_h) = monitor_work_area(&monitor);
+    let margin = OVERLAY_BOTTOM_MARGIN * monitor_scale;
+
+    // Horizontal: work-area center, clamped so an oversized window still fits.
+    let x = (area_x + (area_w - window_w) / 2.0)
+        .clamp(area_x, (area_x + area_w - window_w).max(area_x));
+    // Vertical: `OVERLAY_BOTTOM_MARGIN` above the work-area bottom (taskbar).
+    let y = (area_y + area_h - window_h - margin).max(area_y);
+
+    // `set_position` converts logical to physical with the window's *current*
+    // scale factor (tao `set_outer_position`), so hand it logical coordinates
+    // derived from that same scale and the window lands exactly on (x, y).
+    let _ = win.set_position(LogicalPosition::new(x / window_scale, y / window_scale));
+}
+
+/// Whether the always-on HUD capsule is visible per the tray toggle. A capsule
+/// hidden from the tray stays hidden even when a session starts (recording and
+/// the middle-click / keyboard triggers keep working without it).
+fn overlay_visible<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
+    app.try_state::<AppState>()
+        .map(|s| s.config.load().app.overlay_visible)
+        .unwrap_or(true)
+}
+
+/// Show the HUD overlay window (standby capsule / recording feedback).
+///
+/// The window is repositioned (bottom-center of the cursor's monitor) *before*
+/// it becomes visible so it never flashes at its previous position: both calls
+/// travel through the same event-loop queue, in order.
+///
+/// The Windows hardening (no activation + no DWM focus frame) is re-applied
+/// around the show, idempotently: `show()` is the only call that can activate
+/// the HUD, so `WS_EX_NOACTIVATE` must already be in place *before* it runs,
+/// and the border attribute is set again afterwards in case anything reset it.
+/// This is also the fallback for a setup-time pass that found no overlay
+/// window yet - the HUD can never be shown un-hardened. The startup standby
+/// show goes through this same path, so the always-on capsule is hardened too.
+fn overlay_show<R: tauri::Runtime>(app: &AppHandle<R>) {
+    if !overlay_visible(app) {
+        return;
+    }
+    if let Some(win) = app.get_webview_window("overlay") {
+        crate::windowing::harden_overlay_window(&win);
+        position_overlay_bottom_center(app, &win);
+        let _ = win.show();
+        crate::windowing::harden_overlay_window(&win);
+    }
+}
+
+/// Hide the HUD overlay window immediately (tray "hide floating capsule").
 fn overlay_hide<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some(win) = app.get_webview_window("overlay") {
         let _ = win.hide();
     }
 }
 
-/// Hide the HUD overlay window after a short delay.
+/// Switch the HUD to its standby state without touching visibility: the
+/// capsule is a permanent launcher now (idle -> recording -> ... -> idle), so
+/// session ends return to idle instead of hiding the window.
+fn overlay_emit_idle<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let _ = app.emit("overlay-update", serde_json::json!({ "status": "idle" }));
+}
+
+/// Show the HUD capsule in its standby state (startup, tray "show").
+pub fn show_overlay_idle<R: tauri::Runtime>(app: &AppHandle<R>) {
+    overlay_show(app);
+    overlay_emit_idle(app);
+}
+
+/// Hide the HUD capsule (tray "hide floating capsule"). PTT keyboard and
+/// middle-click triggers are unaffected; session starts simply keep the
+/// capsule hidden.
+pub fn hide_overlay<R: tauri::Runtime>(app: &AppHandle<R>) {
+    overlay_hide(app);
+}
+
+/// Return the HUD to standby after a short delay so the final success / error
+/// state stays readable. We re-check the session status first so a newly
+/// started session is never reset to idle.
 ///
-/// The delay lets the user read the final success / error state. We re-check
-/// the session status before hiding so a newly started session is never hidden.
-fn overlay_hide_later<R: tauri::Runtime>(app: &AppHandle<R>) {
+/// `pub(crate)`: `translate.rs` reuses this instead of keeping a private copy
+/// with the same semantics.
+pub(crate) fn overlay_idle_later<R: tauri::Runtime>(app: &AppHandle<R>) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
@@ -84,17 +224,19 @@ fn overlay_hide_later<R: tauri::Runtime>(app: &AppHandle<R>) {
             })
             .unwrap_or(false);
         if !active {
-            if let Some(win) = handle.get_webview_window("overlay") {
-                let _ = win.hide();
-            }
+            overlay_emit_idle(&handle);
         }
     });
 }
 
 /// Record and broadcast a session error, reset the state machine to `Idle`
 /// (so it can never get stuck in `Processing`), surface it on the HUD, and
-/// schedule the overlay to hide. Every stop failure path funnels through here.
+/// schedule the return to the standby capsule. Every stop failure path funnels
+/// through here.
 fn emit_session_error<R: tauri::Runtime>(app: &AppHandle<R>, state: &AppState, message: String) {
+    // Ending the session (even by failure) invalidates middle-button
+    // ownership: a later middle-button release must not try to stop anything.
+    crate::mouse::clear_owned_session();
     if let Ok(mut session) = state.session.lock() {
         session.fail(message.clone());
         // `fail` marks Error; reset to Idle so the next PTT press is accepted
@@ -106,7 +248,7 @@ fn emit_session_error<R: tauri::Runtime>(app: &AppHandle<R>, state: &AppState, m
         "overlay-update",
         serde_json::json!({ "status": "error", "message": message }),
     );
-    overlay_hide_later(app);
+    overlay_idle_later(app);
 }
 
 /// Wait until the recorder confirms its final flush (end marker) or the
@@ -148,6 +290,10 @@ pub async fn stop_session_internal<R: tauri::Runtime>(
 async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<String, String> {
     let state = app.state::<AppState>();
 
+    // Any stop attempt (PTT release, `stop_session`, middle-button worker)
+    // invalidates middle-button ownership before the session state changes.
+    crate::mouse::clear_owned_session();
+
     {
         let mut session = state.session.lock().map_err(|e| e.to_string())?;
         if session.status != SessionStatus::Recording {
@@ -173,9 +319,24 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
     wait_for_flush(&state, 1200).await;
 
     let config = state.config.load();
-    let wav = {
+    let (wav, duration_ms) = {
         let mut session = state.session.lock().map_err(|e| e.to_string())?;
-        session.take_pcm_wav()
+        // Real audio duration from buffered PCM samples (computed before the
+        // buffer is drained by take_pcm_wav, under the same session lock).
+        let sample_rate = if session.sample_rate > 0 {
+            session.sample_rate as u64
+        } else {
+            16_000
+        };
+        let pcm_duration_ms = (session.pcm.len() as u64) * 1000 / sample_rate;
+        let wav = session.take_pcm_wav();
+        // Classic chunk fallback (webm blobs) has no reliable duration: keep None there.
+        let duration_ms = if wav.len() > 44 {
+            Some(pcm_duration_ms)
+        } else {
+            None
+        };
+        (wav, duration_ms)
     };
 
     // Transcribe
@@ -196,12 +357,35 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
                 return Err("本地识别运行时尚未接入，请使用 MiMo 云端识别（设置 → 识别引擎）。".into());
             }
             _ => {
-                // Default: MiMo cloud ASR
+                // Default: MiMo cloud ASR. Stream the response so the HUD can
+                // show the transcript as it grows (perceived latency); any
+                // stream failure falls back to one non-stream retry below.
                 let (api_key, base, model) = mimo_asr_credentials(&config);
                 if api_key.trim().is_empty() {
                     return Err("MiMo API Key 为空，请到「设置 - 云端识别」填写。".into());
                 }
-                asr::transcribe_cloud(&api_key, &base, &model, &wav, "auto").await?
+                let on_partial = {
+                    let app = app.clone();
+                    move |partial: &str| {
+                        let _ = app.emit(
+                            "overlay-update",
+                            serde_json::json!({
+                                "status": "processing",
+                                "processingStage": "transcribing",
+                                "transcript": partial,
+                            }),
+                        );
+                    }
+                };
+                match asr::transcribe_cloud_stream(&api_key, &base, &model, &wav, "auto", on_partial)
+                    .await
+                {
+                    Ok(text) => text,
+                    Err(e) => {
+                        log::warn!("streaming ASR failed ({e}), retrying non-stream");
+                        asr::transcribe_cloud(&api_key, &base, &model, &wav, "auto").await?
+                    }
+                }
             }
         }
     } else {
@@ -230,9 +414,15 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
     let mut final_text = raw_text;
 
     // Optional refine / translate via LLM
-    if !final_text.trim().is_empty()
-        && (config.llm_refine.enabled || config.llm_refine.translate_output)
-    {
+    if !final_text.trim().is_empty() && config.llm_refine.enabled {
+        let _ = app.emit(
+            "overlay-update",
+            serde_json::json!({
+                "status": "processing",
+                "processingStage": "refining",
+                "transcript": final_text,
+            }),
+        );
         match llm::refine_text(&final_text, &config.llm_refine).await {
             Ok(processed) if !processed.trim().is_empty() => final_text = processed,
             Ok(_) => {}
@@ -242,8 +432,42 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
         }
     }
 
+    // `translate_output` used to be OR-ed into the refine condition above while
+    // only refine_text was ever called, so enabling translation alone did
+    // nothing. Run the translator on its own (after refine when both are on).
+    if !final_text.trim().is_empty() && config.llm_refine.translate_output {
+        let _ = app.emit(
+            "overlay-update",
+            serde_json::json!({
+                "status": "processing",
+                "processingStage": "translating",
+                "transcript": final_text,
+            }),
+        );
+        match llm::translate_text(
+            &final_text,
+            &config.translation.target_language,
+            &config.llm_refine,
+        )
+        .await
+        {
+            Ok(translated) if !translated.trim().is_empty() => final_text = translated,
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("translate failed, using untranslated text: {e}");
+            }
+        }
+    }
+
     if !final_text.trim().is_empty() {
-        let _ = HistoryManager::add(final_text.clone());
+        // Lifetime stats live in their own store (never pruned, immune to
+        // history deletion). Record BEFORE `HistoryManager::add`: on first run
+        // the stats backfill seeds from raw history, and if this item were
+        // already in history at that point it would be counted twice.
+        if let Err(e) = StatsManager::record_add(&final_text, duration_ms) {
+            log::warn!("stats record failed: {e}");
+        }
+        let _ = HistoryManager::add(final_text.clone(), duration_ms);
         if let Err(e) = inject::inject_text(&final_text) {
             log::warn!("text injection failed: {e}");
         }
@@ -262,7 +486,7 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
         }),
     );
     let _ = app.emit("transcription", final_text.clone());
-    overlay_hide_later(app);
+    overlay_idle_later(app);
     Ok(final_text)
 }
 
@@ -272,11 +496,25 @@ pub fn start_session_internal<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<V
     // Prefer streaming capture so we always get PCM for cloud ASR.
     let payload = {
         let mut session = state.session.lock().map_err(|e| e.to_string())?;
-        if session.status == SessionStatus::Recording {
-            return Err("Already recording".into());
+        // Reject any session that is not fully settled. `Recording` is the
+        // long-standing "Already recording" case; `Processing` is the critical
+        // one: transcription + refine + translate can run 60s+, and starting
+        // over it (`session.start(true)`) would silently orphan the in-flight
+        // session and lose its transcript. This guard is the single entry
+        // point for all three triggers (keyboard PTT, middle button, HUD
+        // capsule pointerdown), so all of them are covered. Callers fail
+        // quietly (no error toast): pressing PTT while the previous dictation
+        // is still processing is simply ignored.
+        match session.status {
+            SessionStatus::Idle | SessionStatus::Completed | SessionStatus::Error => {}
+            SessionStatus::Recording => return Err("Already recording".into()),
+            SessionStatus::Processing => return Err("Processing in progress".into()),
         }
         session.start(true)
     };
+    // A successful start invalidates any middle-button ownership token (the
+    // mouse worker re-records its own token after this call returns).
+    crate::mouse::clear_owned_session();
     let mut payload = payload;
     payload.microphone_device_id = if config.asr.microphone_device_id.is_empty() {
         None
@@ -301,16 +539,33 @@ pub fn get_config(state: State<AppState>) -> AppConfig {
     state.config.load_masked()
 }
 
+/// Result of `set_config`: the fully persisted (masked) config plus whether the
+/// hotkey accelerators were rolled back because the new ones could not be
+/// registered. On rollback the renderer must overwrite its hotkey state with
+/// `config.hotkey` and clear the dirty flag, so the rejected value is never
+/// re-sent (which would re-trigger the error toast on every autosave).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetConfigResult {
+    pub config: AppConfig,
+    pub hotkey_rolled_back: bool,
+}
+
 #[tauri::command]
 pub fn set_config(
     app: AppHandle,
     state: State<AppState>,
     config: Value,
-) -> Result<AppConfig, String> {
+) -> Result<SetConfigResult, String> {
     // Keep the previously working accelerators so we can roll back if the new
     // ones cannot be registered (e.g. the OS rejects a key).
     let previous_hotkeys = state.config.load().hotkey;
     let merged = state.config.merge(&config)?;
+    // Mouse middle-click push-to-talk takes effect immediately: the hook is
+    // installed / removed on its own thread (mouse.rs), so this is a cheap,
+    // thread-safe toggle rather than a rebind with rollback semantics.
+    crate::mouse::set_middle_click_ptt(merged.mouse.middle_click_ptt);
+    let mut hotkey_rolled_back = false;
     if let Err(err) = hotkey::rebind(&app, &merged.hotkey) {
         // Re-bind the previous accelerators so PTT keeps working, and restore
         // the stored hotkey config to match the active bindings.
@@ -322,12 +577,25 @@ pub fn set_config(
                 "translateKey": previous_hotkeys.translate_key,
             }
         }));
+        hotkey_rolled_back = true;
         let _ = app.emit(
             "error",
             serde_json::json!({ "message": format!("快捷键不受支持，已恢复为原设置：{err}") }),
         );
     }
-    Ok(state.config.load_masked())
+    Ok(SetConfigResult {
+        config: state.config.load_masked(),
+        hotkey_rolled_back,
+    })
+}
+
+/// Toggle the guard used by the settings hotkey recorder: while active, global
+/// hotkey presses (PTT / translate) are ignored so recording a combination in
+/// the settings UI cannot trigger an action. The renderer resets this on every
+/// recorder exit path (commit, Esc, blur, unmount).
+#[tauri::command]
+pub fn set_hotkey_capture_active(state: State<AppState>, active: bool) {
+    state.set_hotkey_capture_active(active);
 }
 
 #[tauri::command]
@@ -483,6 +751,11 @@ pub fn get_history() -> Vec<crate::history::HistoryItem> {
 }
 
 #[tauri::command]
+pub fn get_stats() -> StatsStore {
+    StatsManager::get()
+}
+
+#[tauri::command]
 pub fn clear_history() -> Result<(), String> {
     HistoryManager::clear()
 }
@@ -504,11 +777,14 @@ pub async fn stop_session(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub fn cancel_session(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    // Cancelling ends the session: middle-button ownership goes with it.
+    crate::mouse::clear_owned_session();
     let mut session = state.session.lock().map_err(|e| e.to_string())?;
     session.cancel();
     let _ = app.emit("stop-recording", session.id.clone());
     drop(session);
-    overlay_hide(&app);
+    // Cancelled sessions go straight back to standby; the capsule stays up.
+    overlay_emit_idle(&app);
     Ok(())
 }
 
@@ -666,12 +942,41 @@ pub fn set_ignore_mouse_events(window: WebviewWindow, ignore: bool) -> Result<()
         .map_err(|e| e.to_string())
 }
 
+/// Resize the HUD overlay capsule (logical px) and keep it bottom-centered.
+///
+/// Renderer contract (`src/lib/tauri-api.ts`): invoke name `set_overlay_size`,
+/// arguments `{ width, height }`. The command always targets the `overlay`
+/// window regardless of which window invoked it, so a misrouted call can never
+/// resize the settings window. Both values are clamped to
+/// [`OVERLAY_MIN_SIZE`]..=[`OVERLAY_MAX_SIZE`] before use; no lower value is
+/// rejected loudly — the caller simply gets the clamped result.
 #[tauri::command]
-pub fn show_settings_window(app: AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.set_focus();
-    }
+pub fn set_overlay_size(window: WebviewWindow, width: u32, height: u32) -> Result<(), String> {
+    let app = window.app_handle();
+    let win = app
+        .get_webview_window(crate::windowing::OVERLAY_WINDOW_LABEL)
+        .ok_or_else(|| "Overlay window is unavailable".to_string())?;
+    let width = width.clamp(OVERLAY_MIN_SIZE.0, OVERLAY_MAX_SIZE.0);
+    let height = height.clamp(OVERLAY_MIN_SIZE.1, OVERLAY_MAX_SIZE.1);
+    // Logical size: the capsule is laid out in logical px everywhere else
+    // (`position_overlay_bottom_center` derives its physical size per monitor).
+    win.set_size(LogicalSize::new(width as f64, height as f64))
+        .map_err(|e| e.to_string())?;
+    // Re-center after resizing so the capsule stays anchored to the bottom of
+    // the cursor's monitor work area (same path as every `overlay_show`).
+    position_overlay_bottom_center(app, &win);
+    Ok(())
+}
+
+/// Show the main (settings) window, rebuilding it on demand if the delayed
+/// destroy already reclaimed it (`windowing::ensure_main_window`).
+///
+/// `async` on purpose: on Windows, creating a webview window from a
+/// synchronous IPC handler deadlocks (WebView2 reentrancy, wry#583), so the
+/// window work runs on the async runtime / a worker thread instead.
+#[tauri::command]
+pub async fn show_settings_window(app: AppHandle) -> Result<(), String> {
+    crate::windowing::open_main_window(&app);
     Ok(())
 }
 

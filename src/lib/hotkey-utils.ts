@@ -37,7 +37,17 @@ export interface HotkeyValidationOptions {
 }
 
 /** Modifier tokens accepted in an Accelerator, including the cross-platform alias. */
-const MODIFIER_KEYS = ['Command', 'Control', 'Alt', 'Shift', 'CommandOrControl']
+const MODIFIER_KEYS = [
+  'Command',
+  'Control',
+  'Alt',
+  'Shift',
+  'CommandOrControl',
+  // 右侧修饰键 token（Rust 端 bare_modifier_code 映射到 Code::ControlRight/AltRight/ShiftRight）
+  'ControlRight',
+  'AltRight',
+  'ShiftRight',
+]
 
 /** Named (non-character) main keys supported by the Rust hotkey parser. */
 const NAMED_HOTKEY_KEYS = new Set([
@@ -66,6 +76,10 @@ const NAMED_HOTKEY_KEYS = new Set([
   'Minus',
   'Equal',
   'Backquote',
+  // 右侧修饰键 token 也走白名单（与 Rust 端逐字对齐）
+  'ControlRight',
+  'AltRight',
+  'ShiftRight',
 ])
 
 /** Raw punctuation characters map back to the canonical tokens above. */
@@ -111,15 +125,29 @@ export function isSupportedHotkeyKey(key: string): boolean {
 
 /**
  * 将 KeyboardEvent 的 key 转换为 Electron Accelerator 格式
+ *
+ * 修饰键用物理键 `code` 区分左右侧：右侧产出 `AltRight/ControlRight/ShiftRight`
+ * token（可单独作为 PTT 快捷键），左侧保持旧 token（向后兼容已保存配置）。
+ * Windows 的 AltGr（右 Alt）会额外补发一个合成 Control 按键，这里直接丢弃。
  */
 export function normalizeKey(e: KeyboardEvent): string | null {
   const { key, code } = e
 
-  // 修饰键映射
-  if (key === 'Meta') return 'Command'
-  if (key === 'Control') return 'Control'
-  if (key === 'Alt') return 'Alt'
-  if (key === 'Shift') return 'Shift'
+  // 修饰键映射（按物理键 code 区分左右）
+  if (key === 'Meta' || code === 'MetaLeft' || code === 'MetaRight') return 'Command'
+  // Firefox 把 AltGr 报告为 key 'AltGraph'（code 仍是 'AltRight'）
+  if (key === 'AltGraph') return 'AltRight'
+  if (key === 'Control' || code === 'ControlLeft' || code === 'ControlRight') {
+    // AltGr 的合成 Control 按键：丢弃，交给随后的右 Alt（AltRight）处理
+    if (e.getModifierState('AltGraph')) return null
+    return code === 'ControlRight' ? 'ControlRight' : 'Control'
+  }
+  if (key === 'Alt' || code === 'AltLeft' || code === 'AltRight') {
+    return code === 'AltRight' ? 'AltRight' : 'Alt'
+  }
+  if (key === 'Shift' || code === 'ShiftLeft' || code === 'ShiftRight') {
+    return code === 'ShiftRight' ? 'ShiftRight' : 'Shift'
+  }
 
   // 特殊键映射
   if (key === ' ') return 'Space'
@@ -157,21 +185,38 @@ export function normalizeKey(e: KeyboardEvent): string | null {
 
 /**
  * 将按键集合转换为 Electron Accelerator 字符串
+ *
+ * 裸右侧修饰键保留 `AltRight/ControlRight/ShiftRight` token（可注册为裸 PTT 键）；
+ * 组合键中右侧修饰键归一为普通修饰 token（Tauri Modifiers 无左右位标志）。
  */
 export function buildAccelerator(keys: Set<string>): string {
   const modifierOrder = ['Command', 'Control', 'Alt', 'Shift']
-  const modifiers = modifierOrder.filter((m) => keys.has(m))
-  const mainKeys = [...keys].filter((k) => !modifierOrder.includes(k))
+  const sidedToPlain: Record<string, string> = {
+    ControlRight: 'Control',
+    AltRight: 'Alt',
+    ShiftRight: 'Shift',
+  }
 
-  if (modifiers.length === 0 && mainKeys.length === 0) return ''
+  const sidedKeys = [...keys].filter((k) => k in sidedToPlain)
+  const plainModifiers = modifierOrder.filter((m) => keys.has(m))
+  const mainKeys = [...keys].filter((k) => !modifierOrder.includes(k) && !(k in sidedToPlain))
+
+  // 只按下一个右侧修饰键：整串就一个 token，保留左右信息
+  if (keys.size === 1 && sidedKeys.length === 1) return sidedKeys[0]
+
+  if (plainModifiers.length === 0 && mainKeys.length === 0 && sidedKeys.length === 0) return ''
+
+  // 组合键：右侧修饰键归一为普通修饰键并去重（同时按左右 Alt 只算一个 Alt）
+  const modifiers = new Set([...plainModifiers, ...sidedKeys.map((k) => sidedToPlain[k])])
+  const orderedModifiers = modifierOrder.filter((m) => modifiers.has(m))
 
   // 只取最后一个非修饰键
   const mainKey = mainKeys.length > 0 ? mainKeys[mainKeys.length - 1] : null
 
   if (mainKey) {
-    return [...modifiers, mainKey].join('+')
+    return [...orderedModifiers, mainKey].join('+')
   }
-  return modifiers.join('+')
+  return orderedModifiers.join('+')
 }
 
 /**
@@ -184,6 +229,9 @@ export function formatHotkey(accelerator: string, fallback = ''): string {
 
   if (isMac) {
     return accelerator
+      .replace(/ControlRight/g, 'Right ⌃')
+      .replace(/ShiftRight/g, 'Right ⇧')
+      .replace(/AltRight/g, 'Right ⌥')
       .replace(/Command/g, '⌘')
       .replace(/Control/g, '⌃')
       .replace(/Alt/g, '⌥')
@@ -193,6 +241,9 @@ export function formatHotkey(accelerator: string, fallback = ''): string {
   }
 
   return accelerator
+    .replace(/ControlRight/g, 'Right Ctrl')
+    .replace(/ShiftRight/g, 'Right Shift')
+    .replace(/AltRight/g, 'Right Alt')
     .replace(/Command/g, 'Win')
     .replace(/Control/g, 'Ctrl')
     .replace(/Alt/g, 'Alt')
@@ -235,6 +286,12 @@ export function validateHotkey(
     return { valid: false, messageKey: 'multiple' }
   }
 
+  // 与 Rust 解析器逐字对齐：纯修饰键串必须是单个裸修饰键（如 "Alt" / "AltRight"），
+  // "Alt+Shift" 这类带 '+' 的多修饰键组合没有主键，Rust 端必然解析失败，直接拒绝
+  if (nonModifiers.length === 0 && parts.length > 1) {
+    return { valid: false, messageKey: 'modifierOnly' }
+  }
+
   if (!allowModifierOnly && nonModifiers.length === 0) {
     return { valid: false, messageKey: 'modifierOnly' }
   }
@@ -246,17 +303,19 @@ export function validateHotkey(
   return { valid: true }
 }
 
+/** All tokens (and legacy `KeyboardEvent.key` values) treated as modifiers. */
+const MODIFIER_TOKENS = new Set<string>([...MODIFIER_KEYS, 'Meta'])
+
 /**
- * 检测是否为单独的修饰键
+ * 检测是否为修饰键（Accelerator token 或 KeyboardEvent.key 值，含右侧修饰键）
  */
 export function isModifierOnly(key: string): boolean {
-  return ['Meta', 'Control', 'Alt', 'Shift'].includes(key)
+  return MODIFIER_TOKENS.has(key) || key === 'AltGraph'
 }
 
 /**
  * 检测按键集合中是否包含非修饰键
  */
 export function hasNonModifierKey(keys: Set<string>): boolean {
-  const modifiers = ['Command', 'Control', 'Alt', 'Shift']
-  return [...keys].some((k) => !modifiers.includes(k))
+  return [...keys].some((k) => !isModifierOnly(k))
 }

@@ -8,6 +8,20 @@ type StopMeta = {
   rotateAfterStop: boolean
 }
 
+/**
+ * Create the session's AudioContext at 16 kHz so the AudioWorklet reports (and
+ * Rust encodes) 16 kHz PCM: the upload is ~3x smaller than the 48 kHz hardware
+ * default and speech ASR needs nothing more. Falls back to the device default
+ * rate on platforms that reject a custom sampleRate.
+ */
+function createRecordingAudioContext(): AudioContext {
+  try {
+    return new AudioContext({ sampleRate: 16_000 })
+  } catch {
+    return new AudioContext()
+  }
+}
+
 export function AudioRecorder() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -419,7 +433,10 @@ export function AudioRecorder() {
 
       streamRef.current = stream
 
-      const audioContext = new AudioContext()
+      // 16 kHz keeps the PCM/WAV upload ~3x smaller than the 48 kHz hardware
+      // default (speech ASR needs nothing more); the worklet reports the actual
+      // context rate and Rust encodes the WAV with it.
+      const audioContext = createRecordingAudioContext()
       audioContextRef.current = audioContext
 
       const source = audioContext.createMediaStreamSource(stream)

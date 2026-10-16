@@ -139,6 +139,8 @@ export interface HotkeyConfig {
 export interface AppPreferences {
   language: LanguageSetting
   autoLaunch?: boolean
+  /** Whether the always-on HUD capsule is visible. Owned by the tray toggle. */
+  overlayVisible?: boolean
 }
 
 export interface LanguageSnapshot {
@@ -147,12 +149,18 @@ export interface LanguageSnapshot {
   locale: string
 }
 
+export interface MouseConfig {
+  /** Middle mouse button acts as push-to-talk (Windows only). */
+  middleClickPtt: boolean
+}
+
 export interface AppConfig {
   app: AppPreferences
   asr: ASRConfig
   llmRefine: LLMRefineConfig
   hotkey: HotkeyConfig
   translation: TranslationConfig
+  mouse?: MouseConfig
 }
 
 export type LinuxDesktopSession = 'omarchy' | 'hyprland' | 'wayland' | 'x11' | 'other'
@@ -298,7 +306,8 @@ export const IPC_CHANNELS = {
   TRANSLATION_TRIGGER: 'translation:trigger',
 } as const
 
-export type OverlayStatus = 'recording' | 'processing' | 'success' | 'error'
+/** `idle` is the always-on standby capsule: shown at startup and after every session. */
+export type OverlayStatus = 'idle' | 'recording' | 'processing' | 'success' | 'error'
 export type OverlayProcessingStage = 'transcribing' | 'refining' | 'translating'
 
 export interface OverlayState {

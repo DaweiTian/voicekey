@@ -185,6 +185,9 @@ export function normalizeRendererConfig(loadedConfig: AppConfig): AppConfig {
       enabled: loadedConfig.translation?.enabled ?? TRANSLATION.ENABLED,
       targetLanguage: loadedConfig.translation?.targetLanguage || TRANSLATION.TARGET_LANGUAGE,
     },
+    mouse: {
+      middleClickPtt: loadedConfig.mouse?.middleClickPtt ?? false,
+    },
   }
 }
 
@@ -233,5 +236,47 @@ export function applyPersistedSecretState(
     ...currentConfig,
     llmRefine,
     asr,
+  }
+}
+
+/**
+ * Sync the renderer hotkey state with what the main process actually persisted. When
+ * `set_config` rolled the accelerators back (`hotkeyRolledBack`, rebind failure) the
+ * persisted values replace the rejected ones so `isHotkeyConfigDirty` clears and the
+ * invalid value is never re-sent on later autosaves (which would re-trigger the error
+ * toast every time). Outside a rollback, persisted values only replace fields the
+ * editor still holds from this save, so edits made while the request was in flight are
+ * never overwritten.
+ */
+export function applyPersistedHotkeyState(
+  currentConfig: AppConfig,
+  savedPatch: Partial<AppConfig>,
+  persistedConfig: AppConfig,
+  hotkeyRolledBack: boolean,
+): AppConfig {
+  const savedHotkey = savedPatch.hotkey
+  if (!savedHotkey && !hotkeyRolledBack) return currentConfig
+
+  // Rollback without a hotkey patch (defensive): the persisted state wins outright.
+  const replaceAll = hotkeyRolledBack && !savedHotkey
+  const shouldReplace = (current: string, saved: string | undefined): boolean =>
+    replaceAll || (saved !== undefined && current === saved)
+
+  return {
+    ...currentConfig,
+    hotkey: {
+      pttKey: shouldReplace(currentConfig.hotkey.pttKey, savedHotkey?.pttKey)
+        ? persistedConfig.hotkey.pttKey
+        : currentConfig.hotkey.pttKey,
+      toggleSettings: shouldReplace(
+        currentConfig.hotkey.toggleSettings,
+        savedHotkey?.toggleSettings,
+      )
+        ? persistedConfig.hotkey.toggleSettings
+        : currentConfig.hotkey.toggleSettings,
+      translateKey: shouldReplace(currentConfig.hotkey.translateKey, savedHotkey?.translateKey)
+        ? persistedConfig.hotkey.translateKey
+        : currentConfig.hotkey.translateKey,
+    },
   }
 }

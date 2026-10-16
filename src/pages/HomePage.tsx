@@ -6,7 +6,7 @@ import { VoiceWave } from '@/components/VoiceWave'
 import { HotkeyKeys } from '@/components/HotkeyKeys'
 import StatsOverview from '@/components/StatsOverview'
 import InteractiveCharts from '@/components/InteractiveCharts'
-import { computeStats, type HistoryItem } from '@/lib/stats'
+import { computeStats, type HistoryItem, type StoredDictationStats } from '@/lib/stats'
 import { useStatFormatters } from '@/lib/useStatFormatters'
 
 function greetingKey(): string {
@@ -34,6 +34,7 @@ export default function HomePage() {
   const { formatNumber, formatDuration } = useStatFormatters()
   const [pttKey, setPttKey] = useState('')
   const [historyItems, setHistoryItems] = useState<HistoryItem[]>([])
+  const [storedStats, setStoredStats] = useState<StoredDictationStats | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -44,21 +45,40 @@ export default function HomePage() {
   }, [])
 
   useEffect(() => {
-    const loadHistory = async () => {
+    let active = true
+    const loadData = async (showLoading = true) => {
       try {
-        setLoading(true)
-        const data = await window.electronAPI.getHistory()
-        setHistoryItems(data)
+        if (showLoading) setLoading(true)
+        // 历史与累计统计并行取数；getStats 失败时保留 null，降级为纯历史聚合
+        const [data, stored] = await Promise.all([
+          window.electronAPI.getHistory(),
+          window.electronAPI.getStats().catch((error) => {
+            console.error('Failed to load stored stats:', error)
+            return null
+          }),
+        ])
+        if (active) {
+          setHistoryItems(data)
+          setStoredStats(stored)
+        }
       } catch (error) {
         console.error('Failed to load history:', error)
       } finally {
-        setLoading(false)
+        if (active && showLoading) setLoading(false)
       }
     }
-    loadHistory()
+    loadData()
+    // Refresh stats whenever a transcription completes (event emitted by Rust).
+    const unsub = window.electronAPI.onTranscription(() => {
+      loadData(false)
+    })
+    return () => {
+      active = false
+      unsub()
+    }
   }, [])
 
-  const stats = useMemo(() => computeStats(historyItems), [historyItems])
+  const stats = useMemo(() => computeStats(historyItems, storedStats), [historyItems, storedStats])
   const isMac = window.electronAPI.platform === 'darwin'
   const effectivePtt = pttKey || (isMac ? 'Alt' : 'Control+Shift+Space')
 
@@ -138,7 +158,7 @@ export default function HomePage() {
       </div>
 
       <div className="mt-4">
-        <StatsOverview historyItems={historyItems} />
+        <StatsOverview stats={stats} />
       </div>
 
       <div className="mt-4">

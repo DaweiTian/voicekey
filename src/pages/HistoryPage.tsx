@@ -109,22 +109,35 @@ export default function HistoryPage() {
     [locale, t],
   )
 
-  const loadHistory = React.useCallback(async () => {
-    try {
-      setLoading(true)
-      const data = await window.electronAPI.getHistory()
-      setItems(data)
-      setSelectedId((prev) => prev ?? data[0]?.id ?? null)
-    } catch (error) {
-      console.error('Failed to load history:', error)
-      toast.error(t('history.loadFailed'))
-    } finally {
-      setLoading(false)
-    }
-  }, [t])
+  const loadHistory = React.useCallback(
+    async (silent = false) => {
+      try {
+        if (!silent) setLoading(true)
+        const data = await window.electronAPI.getHistory()
+        setItems(data)
+        setSelectedId((prev) => prev ?? data[0]?.id ?? null)
+      } catch (error) {
+        console.error('Failed to load history:', error)
+        if (!silent) toast.error(t('history.loadFailed'))
+      } finally {
+        if (!silent) setLoading(false)
+      }
+    },
+    [t],
+  )
 
   React.useEffect(() => {
     loadHistory()
+  }, [loadHistory])
+
+  // Refresh the list whenever a transcription completes (event emitted by Rust).
+  React.useEffect(() => {
+    const unsub = window.electronAPI.onTranscription(() => {
+      loadHistory(true)
+    })
+    return () => {
+      unsub()
+    }
   }, [loadHistory])
 
   const filteredItems = React.useMemo(() => {

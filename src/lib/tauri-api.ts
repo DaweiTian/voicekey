@@ -22,6 +22,7 @@ import type {
   RecordingStartPayload as SharedRecordingStartPayload,
   UpdateInfo,
 } from '@/shared/types'
+import type { StoredDictationStats } from '@/lib/stats'
 
 export interface RecordingStartPayload extends SharedRecordingStartPayload {
   mode?: string
@@ -47,6 +48,17 @@ export interface StreamingAudioFramePayload {
 export interface StreamingAudioEndPayload {
   sessionId: string
   sequence: number
+}
+
+/**
+ * Result of `set_config`: the fully persisted (masked) config plus whether the
+ * hotkey accelerators were rolled back in the main process because the new ones
+ * could not be registered. On rollback the renderer must overwrite its hotkey
+ * state with `config.hotkey` and clear the dirty flag.
+ */
+export interface SetConfigResult {
+  config: AppConfig
+  hotkeyRolledBack: boolean
 }
 
 type Unsub = () => void
@@ -76,7 +88,7 @@ export const tauriApi = {
 
   // config
   getConfig: () => invoke<AppConfig>('get_config'),
-  setConfig: (config: Partial<AppConfig>) => invoke<AppConfig>('set_config', { config }),
+  setConfig: (config: Partial<AppConfig>) => invoke<SetConfigResult>('set_config', { config }),
   getConfigSecret: (request: ConfigSecretRequest) =>
     invoke<string>('get_config_secret', { request }),
   testRefineConnection: (config: LLMRefineConfig) =>
@@ -112,9 +124,16 @@ export const tauriApi = {
   clearHistory: () => invoke<void>('clear_history'),
   deleteHistoryItem: (id: string) => invoke<boolean>('delete_history_item', { id }),
 
+  // lifetime stats (independent store; history deletion/pruning never resets it)
+  getStats: () => invoke<StoredDictationStats>('get_stats'),
+
   // hotkeys (registration is handled in Rust)
   registerHotkey: async () => true,
   unregisterHotkey: async () => undefined,
+  // While the settings hotkey recorder is capturing, Rust ignores PTT/translate
+  // global hotkey presses so recorded combos cannot trigger actions.
+  setHotkeyCaptureActive: (active: boolean) =>
+    invoke<void>('set_hotkey_capture_active', { active }),
 
   // events
   onSessionStatus: (cb: (status: string) => void): Unsub => listenAsync('session-status', cb),
@@ -172,6 +191,11 @@ export const tauriApi = {
   setIgnoreMouseEvents: (ignore: boolean) => {
     void invoke('set_ignore_mouse_events', { ignore })
   },
+
+  // Overlay 窗口按内容尺寸缩放：渲染层测量胶囊实际尺寸后调用，Rust 侧
+  // `set_overlay_size` 负责钳制尺寸合法性并保持窗口底部居中（W1 点击死区修复）。
+  setOverlaySize: (width: number, height: number) =>
+    invoke<void>('set_overlay_size', { width, height }),
 
   // updates
   checkForUpdates: () => invoke<UpdateInfo>('check_for_updates'),

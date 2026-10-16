@@ -171,15 +171,17 @@ async fn chat_completion(
             {"role": "user", "content": user},
         ],
         "temperature": 0.2,
+        // Bound completion length adaptively. A rewritten / translated copy of
+        // the input needs roughly one token per input char (CJK) and fewer for
+        // Latin scripts, so `input + margin` never truncates normal output;
+        // the floor leaves short push-to-talk utterances room for reasoning,
+        // and the ceiling stops a thinking model from wandering.
+        "max_tokens": (user.chars().count() + 256).clamp(512, 8192),
     });
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let response = client
+    let response = crate::state::shared_http_client()
         .post(&url)
+        .timeout(std::time::Duration::from_secs(60))
         .bearer_auth(api_key)
         .json(&payload)
         .send()
@@ -216,9 +218,13 @@ async fn chat_completion(
 fn strip_think(content: &str) -> String {
     let trimmed = content.trim();
     if let Some(rest) = trimmed.strip_prefix("<think>") {
-        if let Some(end) = rest.find("</think>") {
-            return rest[end + "</think>".len()..].trim().to_string();
-        }
+        return match rest.find("</think>") {
+            Some(end) => rest[end + "</think>".len()..].trim().to_string(),
+            // Unterminated think block (e.g. max_tokens cut the output short):
+            // there is no usable answer, and callers keep the raw text on an
+            // empty result instead of injecting think garbage.
+            None => String::new(),
+        };
     }
     trimmed.to_string()
 }
@@ -234,6 +240,15 @@ pub async fn translate_text(
 ) -> Result<String, String> {
     let user = format!("Target language: {target_language}\n\n{text}");
     chat_completion(TRANSLATE_SYSTEM_PROMPT, &user, config).await
+}
+
+/// Whether the LLM connection resolves to a complete endpoint / model / API
+/// key. Clipboard-touching flows (selection translation) check this *before*
+/// any side effects so an unconfigured connection fails fast with a visible
+/// hint — the role of the Electron blueprint's `resolveConfig` pre-check.
+pub fn connection_ready(config: &LLMRefineConfig) -> bool {
+    let (url, model, api_key) = resolve_connection(config);
+    !url.is_empty() && !model.is_empty() && !api_key.is_empty()
 }
 
 pub async fn test_connection(config: &LLMRefineConfig) -> RefineConnectionResult {
