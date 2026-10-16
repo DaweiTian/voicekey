@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "芷若",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "identifier": "com.buildwithais.voicekey",
   "build": {
     "beforeDevCommand": "npm run dev:vite",

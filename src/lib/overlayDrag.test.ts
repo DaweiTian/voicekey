@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest'
+import type { OverlayStatus } from '@/shared/types'
 import {
   DRAG_THRESHOLD_PX,
   DOUBLE_CLICK_MAX_MS,
-  TAP_MAX_MS,
+  HOLD_LATCH_MAX_MS,
+  SILENCE_AUTO_STOP_MS,
   WATCHDOG_MAX_MS,
   initialOverlayDragState,
+  isSilenceAutoStopDue,
   onDoubleClick,
+  onHoldTimer,
   onPointerCancel,
   onPointerDown,
   onPointerMove,
@@ -52,16 +56,40 @@ const moveCmdPos = (cmds: DragCommand[]): { x: number; y: number } | null => {
   return cmd ? cmd.pos : null
 }
 
+/** Begin a fresh gesture from idle and return the resulting state. */
+const beginGesture = (
+  from: OverlayDragState = initialOverlayDragState(),
+  now = 0,
+  status: OverlayStatus = 'idle',
+  screen: { x: number; y: number } = { x: 100, y: 100 },
+): OverlayDragState => {
+  const [state] = onPointerDown(downEvent(1, screen), from, now, status)
+  return state
+}
+
 describe('onPointerDown', () => {
-  it('starts a pending drag / PTT from idle when status is idle', () => {
+  it('enters pending from idle WITHOUT starting a session (no resize during the gesture)', () => {
     const [state, cmds] = onPointerDown(downEvent(1), initialOverlayDragState(), 0, 'idle')
     expect(state.phase).toBe('pending')
     expect(state.pointerId).toBe(1)
     expect(state.startScreen).toEqual({ x: 100, y: 100 })
-    expect(hasCmd(cmds, 'start-session')).toBe(true)
+    // REGRESSION LOCK: pointerdown must NOT start a session any more. Starting one
+    // resizes/re-anchors the overlay window mid-gesture, which broke dragging on
+    // real hardware (see overlayDrag.ts module header).
+    expect(hasCmd(cmds, 'start-session')).toBe(false)
     expect(hasCmd(cmds, 'capture-pointer')).toBe(true)
     expect(hasCmd(cmds, 'add-listeners')).toBe(true)
     expect(hasCmd(cmds, 'start-watchdog')).toBe(true)
+    expect(hasCmd(cmds, 'start-hold-timer')).toBe(true)
+    expect(hasCmd(cmds, 'suppress-resize')).toBe(true)
+    expect(state.holdDeadline).toBe(HOLD_LATCH_MAX_MS)
+  })
+
+  it('also begins a gesture on a latched recording so a second tap can stop it', () => {
+    const latched: OverlayDragState = { ...initialOverlayDragState(), latched: true }
+    const [state] = onPointerDown(downEvent(1), latched, 0, 'recording')
+    expect(state.phase).toBe('pending')
+    expect(state.startedLatched).toBe(true)
   })
 
   it('ignores non-primary buttons', () => {
@@ -74,7 +102,7 @@ describe('onPointerDown', () => {
     expect(state.phase).toBe('idle')
   })
 
-  it('is no-op when overlay status is not idle', () => {
+  it('is no-op for an active non-latched recording', () => {
     const [state] = onPointerDown(downEvent(1), initialOverlayDragState(), 0, 'recording')
     expect(state.phase).toBe('idle')
   })
@@ -86,8 +114,44 @@ describe('onPointerDown', () => {
   })
 })
 
+describe('hold timer resolves pending into PTT', () => {
+  it('enters holding and starts a session once the threshold is reached', () => {
+    const state = beginGesture()
+    const [nextState, cmds] = onHoldTimer(state, HOLD_LATCH_MAX_MS)
+    expect(nextState.phase).toBe('holding')
+    expect(hasCmd(cmds, 'start-session')).toBe(true)
+    expect(hasCmd(cmds, 'allow-resize')).toBe(true)
+    expect(hasCmd(cmds, 'clear-watchdog')).toBe(true)
+  })
+
+  it('does nothing before the deadline', () => {
+    const state = beginGesture()
+    const [nextState, cmds] = onHoldTimer(state, HOLD_LATCH_MAX_MS - 1)
+    expect(nextState.phase).toBe('pending')
+    expect(cmds).toHaveLength(0)
+  })
+
+  it('does nothing once the gesture moved into dragging', () => {
+    let state = beginGesture()
+    ;[state] = onPointerMove(moveEvent(1, { x: 100 + DRAG_THRESHOLD_PX + 5, y: 100 }), state, 10)
+    expect(state.phase).toBe('dragging')
+    const [nextState, cmds] = onHoldTimer(state, HOLD_LATCH_MAX_MS)
+    expect(nextState.phase).toBe('dragging')
+    expect(hasCmd(cmds, 'start-session')).toBe(false)
+  })
+
+  it('does not start a session when the gesture began on a latched recording', () => {
+    const latched: OverlayDragState = { ...initialOverlayDragState(), latched: true }
+    const [state] = onPointerDown(downEvent(1), latched, 0, 'recording')
+    const [nextState, cmds] = onHoldTimer(state, HOLD_LATCH_MAX_MS)
+    expect(nextState.phase).toBe('pending')
+    expect(hasCmd(cmds, 'start-session')).toBe(false)
+    expect(nextState.latched).toBe(true)
+  })
+})
+
 describe('whole-window press surface', () => {
-  it('starts and stops a session from a press anywhere on the surface (upper / lower half)', () => {
+  it('latches a session from a press anywhere on the surface (upper / lower half)', () => {
     // The idle / drag handlers live on the full-window container, so the press
     // Y coordinate inside the capsule must never decide whether a session starts.
     for (const y of [88, 100, 112]) {
@@ -98,53 +162,46 @@ describe('whole-window press surface', () => {
         'idle',
       )
       expect(state.phase).toBe('pending')
-      expect(hasCmd(cmds, 'start-session')).toBe(true)
-      const [, upCmds] = onPointerUp(upEvent(1, { x: 100, y }), state, WATCHDOG_MAX_MS - 1)
-      expect(hasCmd(upCmds, 'stop-session')).toBe(true)
+      expect(hasCmd(cmds, 'start-session')).toBe(false)
+      const [afterUp, upCmds] = onPointerUp(upEvent(1, { x: 100, y }), state, 50)
+      expect(hasCmd(upCmds, 'start-session')).toBe(true)
+      expect(hasCmd(upCmds, 'stop-session')).toBe(false)
+      expect(afterUp.latched).toBe(true)
     }
   })
 
   it('keeps lastTap when the second press is rejected while processing, so the reset still fires', () => {
     let state = initialOverlayDragState()
     ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
-    ;[state] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS - 1)
-    const [afterDown] = onPointerDown(
-      downEvent(2, { x: 100, y: 100 }),
-      state,
-      TAP_MAX_MS,
-      'processing',
-    )
+    ;[state] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, 50)
+    const [afterDown] = onPointerDown(downEvent(2, { x: 100, y: 100 }), state, 60, 'processing')
+    expect(afterDown.phase).toBe('idle')
     expect(afterDown.lastTap).not.toBeNull()
-    const [, cmds] = onDoubleClick(afterDown, DOUBLE_CLICK_MAX_MS - 1)
+    const [, cmds] = onDoubleClick(afterDown, 50 + DOUBLE_CLICK_MAX_MS - 1)
     expect(hasCmd(cmds, 'set-overlay-position')).toBe(true)
   })
 })
 
-describe('pending → hold-to-talk (no drag)', () => {
-  it('stops the session on pointerup when movement stayed within threshold', () => {
-    const [state] = onPointerDown(downEvent(1), initialOverlayDragState(), 0, 'idle')
+describe('pending → hold-to-talk (PTT)', () => {
+  it('stops the session on pointerup when the hold threshold was reached', () => {
+    const state = beginGesture()
+    const [held] = onHoldTimer(state, HOLD_LATCH_MAX_MS)
     const [nextState, cmds] = onPointerUp(
-      upEvent(1, { x: 100 + DRAG_THRESHOLD_PX, y: 100 }),
-      state,
-      TAP_MAX_MS - 1,
+      upEvent(1, { x: 100, y: 100 }),
+      held,
+      HOLD_LATCH_MAX_MS + 30,
     )
     expect(nextState.phase).toBe('idle')
+    expect(nextState.latched).toBe(false)
     expect(hasCmd(cmds, 'stop-session')).toBe(true)
     expect(hasCmd(cmds, 'cancel-session')).toBe(false)
     expect(hasCmd(cmds, 'remove-listeners')).toBe(true)
     expect(hasCmd(cmds, 'release-pointer-capture')).toBe(true)
   })
-
-  it('stops the session even when held longer than tap threshold without moving', () => {
-    const [state] = onPointerDown(downEvent(1), initialOverlayDragState(), 0, 'idle')
-    const [nextState, cmds] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS + 50)
-    expect(nextState.phase).toBe('idle')
-    expect(hasCmd(cmds, 'stop-session')).toBe(true)
-  })
 })
 
 describe('pending → dragging', () => {
-  it('enters dragging and cancels session when threshold is exceeded', () => {
+  it('enters dragging and never starts or cancels a session when threshold is exceeded', () => {
     let state = initialOverlayDragState()
     ;[state] = onPointerDown(downEvent(1), state, 0, 'idle')
     const [nextState, cmds] = onPointerMove(
@@ -154,8 +211,12 @@ describe('pending → dragging', () => {
     )
     expect(nextState.phase).toBe('dragging')
     expect(nextState.resizeSuppressed).toBe(true)
-    expect(hasCmd(cmds, 'cancel-session')).toBe(true)
+    // REGRESSION LOCK: dragging must not touch the session (the old design
+    // cancelled a session that pointerdown had wrongly started).
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
+    expect(hasCmd(cmds, 'start-session')).toBe(false)
     expect(hasCmd(cmds, 'suppress-resize')).toBe(true)
+    expect(hasCmd(cmds, 'clear-hold-timer')).toBe(true)
   })
 
   it('ignores pointermove from a different pointerId', () => {
@@ -177,70 +238,118 @@ describe('pending → dragging', () => {
     expect(moveCmdPos(cmds)).toEqual({ x: 1015, y: 530 })
   })
 
-  it('persists position and allows resize on drag release', () => {
-    let state = initialOverlayDragState()
-    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
+  it('persists position, allows resize and keeps latched on drag release', () => {
+    let state: OverlayDragState = { ...initialOverlayDragState(), latched: true }
+    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'recording')
     state = setWinStart(state, { x: 1000, y: 500 }, 1.0)
     ;[state] = onPointerMove(moveEvent(1, { x: 110, y: 110 }), state, 10)
     expect(state.phase).toBe('dragging')
     const [nextState, cmds] = onPointerUp(upEvent(1, { x: 110, y: 110 }), state, 20)
     expect(nextState.phase).toBe('idle')
     expect(nextState.resizeSuppressed).toBe(false)
+    // Dragging a latched recording only moves the window; recording continues.
+    expect(nextState.latched).toBe(true)
     expect(cmdTypes(cmds)).toContain('flush-move')
     expect(cmdTypes(cmds)).toContain('allow-resize')
     expect(cmdTypes(cmds)).toContain('persist-position')
     expect(cmdTypes(cmds)).toContain('remove-listeners')
+    expect(hasCmd(cmds, 'stop-session')).toBe(false)
   })
 })
 
 describe('reset paths must always return to idle', () => {
-  it('pointerup resets pending to idle and clears watchdog', () => {
+  it('pointerup latches a short tap and clears the watchdog / hold timer', () => {
     let state = initialOverlayDragState()
     ;[state] = onPointerDown(downEvent(1), state, 0, 'idle')
-    const [nextState, cmds] = onPointerUp(upEvent(1), state, TAP_MAX_MS - 1)
+    const [nextState, cmds] = onPointerUp(upEvent(1), state, 50)
     expect(nextState.phase).toBe('idle')
+    expect(nextState.latched).toBe(true)
     expect(hasCmd(cmds, 'clear-watchdog')).toBe(true)
+    expect(hasCmd(cmds, 'clear-hold-timer')).toBe(true)
     expect(hasCmd(cmds, 'release-pointer-capture')).toBe(true)
     expect(hasCmd(cmds, 'remove-listeners')).toBe(true)
   })
 
-  it('pointercancel resets pending to idle', () => {
+  it('pointercancel while pending does not cancel a session', () => {
     let state = initialOverlayDragState()
     ;[state] = onPointerDown(downEvent(1), state, 0, 'idle')
     const [nextState, cmds] = onPointerCancel({ pointerId: 1 }, state, 10)
     expect(nextState.phase).toBe('idle')
-    expect(hasCmd(cmds, 'cancel-session')).toBe(true)
+    // pending never started a session, so there is nothing to cancel.
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
+    expect(hasCmd(cmds, 'start-session')).toBe(false)
+    expect(hasCmd(cmds, 'stop-session')).toBe(false)
   })
 
-  it('pointercancel resets dragging to idle and allows resize', () => {
-    let state = initialOverlayDragState()
-    ;[state] = onPointerDown(downEvent(1), state, 0, 'idle')
+  it('pointercancel while pending keeps a latched recording alive', () => {
+    const latched: OverlayDragState = { ...initialOverlayDragState(), latched: true }
+    const [state] = onPointerDown(downEvent(1), latched, 0, 'recording')
+    const [nextState, cmds] = onPointerCancel({ pointerId: 1 }, state, 10)
+    expect(nextState.phase).toBe('idle')
+    expect(nextState.latched).toBe(true)
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
+    expect(hasCmd(cmds, 'stop-session')).toBe(false)
+  })
+
+  it('pointercancel while dragging only restores resize (keeps latched)', () => {
+    let state: OverlayDragState = { ...initialOverlayDragState(), latched: true }
+    ;[state] = onPointerDown(downEvent(1), state, 0, 'recording')
     ;[state] = onPointerMove(moveEvent(1, { x: 200, y: 200 }), state, 10)
     const [nextState, cmds] = onPointerCancel({ pointerId: 1 }, state, 20)
     expect(nextState.phase).toBe('idle')
+    expect(nextState.latched).toBe(true)
     expect(hasCmd(cmds, 'allow-resize')).toBe(true)
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
   })
 
-  it('window blur resets any active drag to idle', () => {
+  it('pointercancel while holding stops the PTT so audio is transcribed, not discarded', () => {
     let state = initialOverlayDragState()
     ;[state] = onPointerDown(downEvent(1), state, 0, 'idle')
+    ;[state] = onHoldTimer(state, HOLD_LATCH_MAX_MS)
+    const [nextState, cmds] = onPointerCancel({ pointerId: 1 }, state, HOLD_LATCH_MAX_MS + 10)
+    expect(nextState.phase).toBe('idle')
+    expect(hasCmd(cmds, 'stop-session')).toBe(true)
+  })
+
+  it('window blur during an active gesture resets to idle without cancelling (latched-exempt)', () => {
+    let state: OverlayDragState = { ...initialOverlayDragState(), latched: true }
+    ;[state] = onPointerDown(downEvent(1), state, 0, 'recording')
     ;[state] = onPointerMove(moveEvent(1, { x: 200, y: 200 }), state, 10)
     const [nextState, cmds] = onWindowBlur(state)
     expect(nextState.phase).toBe('idle')
-    expect(hasCmd(cmds, 'cancel-session')).toBe(true)
+    expect(nextState.latched).toBe(true)
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
     expect(hasCmd(cmds, 'allow-resize')).toBe(true)
   })
 
-  it('watchdog resets stuck dragging state after timeout', () => {
+  it('window blur is a no-op for a latched recording (phase idle)', () => {
+    const latched: OverlayDragState = { ...initialOverlayDragState(), latched: true }
+    const [nextState, cmds] = onWindowBlur(latched)
+    expect(nextState).toBe(latched)
+    expect(cmds).toHaveLength(0)
+  })
+
+  it('watchdog resets stuck dragging state after timeout without cancelling a session', () => {
     let state = initialOverlayDragState()
     ;[state] = onPointerDown(downEvent(1), state, 0, 'idle')
     ;[state] = onPointerMove(moveEvent(1, { x: 200, y: 200 }), state, 10)
     state = { ...state, watchdogAt: 1000 }
     const [nextState, cmds] = onWatchdog(state, 1001)
     expect(nextState.phase).toBe('idle')
-    expect(hasCmd(cmds, 'cancel-session')).toBe(true)
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
     expect(hasCmd(cmds, 'allow-resize')).toBe(true)
     expect(hasCmd(cmds, 'clear-watchdog')).toBe(true)
+  })
+
+  it('watchdog never touches a latched (idle) state', () => {
+    const latched: OverlayDragState = {
+      ...initialOverlayDragState(),
+      latched: true,
+      watchdogAt: 0,
+    }
+    const [nextState, cmds] = onWatchdog(latched, 10_000)
+    expect(nextState).toBe(latched)
+    expect(cmds).toHaveLength(0)
   })
 
   it('watchdog does nothing before deadline', () => {
@@ -252,39 +361,43 @@ describe('reset paths must always return to idle', () => {
   })
 })
 
-describe('tap detection and double-click reset', () => {
-  it('lone short click stops the session (records) instead of cancelling it', () => {
+describe('tap = toggle (latch) and double-click reset', () => {
+  it('a lone short tap latches the session: start-session but no stop-session', () => {
     let state = initialOverlayDragState()
     ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
-    const [nextState, cmds] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS - 1)
-    // REGRESSION LOCK: a plain click must reach stop_session (the 0.5.1 build
-    // cancelled it here, so no click could ever record anything).
-    expect(hasCmd(cmds, 'stop-session')).toBe(true)
-    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
-    expect(nextState.lastTap).toEqual({ point: { x: 100, y: 100 }, time: TAP_MAX_MS - 1 })
+    const [nextState, cmds] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, 50)
+    // A tap must keep recording after release (latched), not stop on release.
+    expect(hasCmd(cmds, 'start-session')).toBe(true)
+    expect(hasCmd(cmds, 'stop-session')).toBe(false)
+    expect(nextState.latched).toBe(true)
+    expect(nextState.lastTap).toEqual({ point: { x: 100, y: 100 }, time: 50 })
   })
 
-  it('cancels only the second click of a double-click, so the reset stays quiet', () => {
+  it('a second tap on a latched recording stops it', () => {
     let state = initialOverlayDragState()
     ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
-    ;[state] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS - 1)
-    // Second press: the previous tap survives pointerdown so the dblclick reset
-    // can still fire even when this press is rejected by Rust.
-    ;[state] = onPointerDown(downEvent(2, { x: 100, y: 100 }), state, TAP_MAX_MS, 'idle')
+    ;[state] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, 50)
+    expect(state.latched).toBe(true)
+    // Second tap, long after the double-click window and far away: a plain stop.
+    ;[state] = onPointerDown(downEvent(2, { x: 400, y: 400 }), state, 2000, 'recording')
+    expect(state.startedLatched).toBe(true)
+    const [nextState, cmds] = onPointerUp(upEvent(2, { x: 400, y: 400 }), state, 2050)
+    expect(hasCmd(cmds, 'stop-session')).toBe(true)
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
+    expect(nextState.latched).toBe(false)
+  })
+
+  it('cancels the second click of a double-click (quiet reset) instead of stopping', () => {
+    let state = initialOverlayDragState()
+    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
+    ;[state] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, 50)
+    // Second press close in time and place — the recording is latched, so the
+    // press begins a stop gesture that resolves to a double-click cancel.
+    ;[state] = onPointerDown(downEvent(2, { x: 100, y: 100 }), state, 150, 'recording')
     expect(state.phase).toBe('pending')
-    const [, cmds] = onPointerUp(upEvent(2, { x: 100, y: 100 }), state, DOUBLE_CLICK_MAX_MS - 1)
+    const [, cmds] = onPointerUp(upEvent(2, { x: 100, y: 100 }), state, 200)
     expect(hasCmd(cmds, 'cancel-session')).toBe(true)
     expect(hasCmd(cmds, 'stop-session')).toBe(false)
-  })
-
-  it('treats a distant second click as a fresh recording, not a double-click', () => {
-    let state = initialOverlayDragState()
-    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
-    ;[state] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS - 1)
-    ;[state] = onPointerDown(downEvent(2, { x: 200, y: 200 }), state, TAP_MAX_MS, 'idle')
-    const [, cmds] = onPointerUp(upEvent(2, { x: 200, y: 200 }), state, DOUBLE_CLICK_MAX_MS - 1)
-    expect(hasCmd(cmds, 'stop-session')).toBe(true)
-    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
   })
 
   it('subsequent double-click resets overlay position when within time and distance', () => {
@@ -311,19 +424,24 @@ describe('tap detection and double-click reset', () => {
     const [, cmds] = onDoubleClick(state, DOUBLE_CLICK_MAX_MS + 1)
     expect(hasCmd(cmds, 'set-overlay-position')).toBe(false)
   })
+})
 
-  it('does not reset on double-click when first press was a real hold', () => {
-    let state = initialOverlayDragState()
-    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
-    const [afterUp] = onPointerUp(upEvent(1, { x: 100, y: 100 }), state, TAP_MAX_MS + 50)
-    expect(afterUp.lastTap).toBeNull()
-    const [, cmds] = onDoubleClick(afterUp, TAP_MAX_MS + 100)
-    expect(hasCmd(cmds, 'set-overlay-position')).toBe(false)
+describe('silence auto-stop helper', () => {
+  it('is due only for a latched recording quiet for the whole window', () => {
+    expect(isSilenceAutoStopDue({ latched: true, lastVoiceAt: 0, now: SILENCE_AUTO_STOP_MS })).toBe(
+      true,
+    )
+    expect(
+      isSilenceAutoStopDue({ latched: true, lastVoiceAt: 0, now: SILENCE_AUTO_STOP_MS - 1 }),
+    ).toBe(false)
+    expect(
+      isSilenceAutoStopDue({ latched: false, lastVoiceAt: 0, now: SILENCE_AUTO_STOP_MS * 10 }),
+    ).toBe(false)
   })
 })
 
-describe('normal hold-to-talk is not swallowed', () => {
-  it('allows a normal hold after a double-click reset', () => {
+describe('hold-to-talk still begins with a gesture, not on pointerdown', () => {
+  it('a hold after a double-click reset only resolves into PTT via the hold timer', () => {
     const state: OverlayDragState = {
       ...initialOverlayDragState(),
       lastTap: { point: { x: 100, y: 100 }, time: 0 },
@@ -336,12 +454,10 @@ describe('normal hold-to-talk is not swallowed', () => {
       'idle',
     )
     expect(afterDown.phase).toBe('pending')
-    expect(hasCmd(cmds, 'start-session')).toBe(true)
-  })
-
-  it('allows a normal hold when no recent tap exists', () => {
-    const [state, cmds] = onPointerDown(downEvent(1), initialOverlayDragState(), 0, 'idle')
-    expect(state.phase).toBe('pending')
-    expect(hasCmd(cmds, 'start-session')).toBe(true)
+    // No session on pointerdown any more; it begins at the hold threshold.
+    expect(hasCmd(cmds, 'start-session')).toBe(false)
+    const [held, holdCmds] = onHoldTimer(afterDown, 500 + HOLD_LATCH_MAX_MS)
+    expect(held.phase).toBe('holding')
+    expect(hasCmd(holdCmds, 'start-session')).toBe(true)
   })
 })

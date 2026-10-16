@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.3](https://github.com/BuildWithAIs/voicekey/compare/v0.5.2...v0.5.3) (2026-10-16)
+
+### Features
+
+- **overlay:** 悬浮胶囊改为点按切换：轻点一下开始录音（松手后保持录音），说完再点一下停止并识别；按住超过 500ms 仍为按住说话（PTT）模式
+- **overlay:** latched 录音态支持 5 秒无声音自动停止（基于音频电平判定）
+
+### Bug Fixes
+
+- **overlay:** 待机胶囊无法拖动——根因为按下即启动会话导致手势进行中窗口缩放重锚定、指针事件被系统取消；改为手势意图明确后才启动会话（轻点松手时开录、按住满 500ms 开录、拖拽全程不触发录音）
+- **overlay:** 快速点击胶囊只闪烁不录音——松手早于麦克风就绪导致会话被丢弃；点按切换语义下会话在松手后保持，麦克风有充足就绪时间
+- **ui:** 移除胶囊外部投影与 backdrop-blur（浅色背景下矩形残留），以提高背景不透明度保持对比度
+
 ## [0.5.2](https://github.com/BuildWithAIs/voicekey/compare/v0.5.1...v0.5.2) (2026-10-16)
 
 ### Bug Fixes

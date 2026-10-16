@@ -13,7 +13,9 @@ import type { OverlayProcessingStage, OverlayState, OverlayStatus } from '@/shar
 import { cn } from '../lib/utils'
 import {
   initialOverlayDragState,
+  isSilenceAutoStopDue,
   onDoubleClick,
+  onHoldTimer,
   onPointerCancel,
   onPointerDown,
   onPointerMove,
@@ -21,6 +23,7 @@ import {
   onWatchdog,
   onWindowBlur,
   setWinStart,
+  SILENCE_LEVEL_THRESHOLD,
   type DragCommand,
   type OverlayDragState,
   type PhysicalPoint,
@@ -144,9 +147,16 @@ export function HUD() {
   // RAF cleanup ref
   const rafIdRef = useRef<number | null>(null)
   /**
-   * 按住说话的「按下」所有权标记：只有本胶囊 pointerdown 成功发起的会话才由
-   * 本胶囊 pointerup 结束。pointerup 会从任何子元素冒泡上来，若无此标记，
-   * 取消按钮的松开或他人会话的松开会被误当成「松开说话结束」。
+   * 会话「松手后是否仍在录音」标记（latch 语义）。true = 一次轻点启动的持续录音，
+   * 需要通过「再点一下」或静音自动停止来结束；此时 pointercancel / blur 均不得杀死它。
+   * 由拖拽状态机的 latched 字段驱动（见 applyDragResult）。
+   */
+  const latchedRef = useRef(false)
+  /** 轻点 latch 起算 / 最后一次探测到声音的时刻，供静音自动停止判定使用。 */
+  const lastVoiceAtRef = useRef(0)
+  /**
+   * 按住说话的所有权标记：只有本胶囊（经状态机命令）成功发起的会话才由本胶囊结束时停止。
+   * 现在的 stop/cancel 全部经状态机命令执行，不再是 React 冒泡处理，故标记仅作对称保护。
    */
   const holdActiveRef = useRef(false)
   /** 与 overlayState 同步，但可在事件回调里同步读取（避免闭包过期）。 */
@@ -180,8 +190,26 @@ export function HUD() {
   /** 看门狗定时器：拖拽 / pending 状态下 N 秒无事件则强制复位。 */
   const watchdogTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  /** 按住阈值定时器：按下 HOLD_LATCH_MAX_MS 后仍未松手 / 未拖拽则进入 PTT。 */
+  const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
   /** 命令执行器 ref：在渲染期间保持最新，供全局事件处理器读取。 */
   const executeDragCommandsRef = useRef<(cmds: DragCommand[]) => void>(() => {})
+
+  /**
+   * 应用状态机的输出：同步 dragRef / latchedRef、在 latch 起点重置静音计时，再执行命令。
+   * 所有状态机入口（pointerdown / 全局 move/up/cancel/blur / 看门狗 / 按住定时器）都经此，
+   * 保证 latchedRef 与 dragRef 永远一致——这是「latched 会话豁免误杀」的正确性前提。
+   */
+  const applyDragResult = (nextState: OverlayDragState, cmds: DragCommand[]) => {
+    const wasLatched = dragRef.current.latched
+    dragRef.current = nextState
+    latchedRef.current = nextState.latched
+    if (nextState.latched && !wasLatched) {
+      lastVoiceAtRef.current = Date.now()
+    }
+    executeDragCommandsRef.current(cmds)
+  }
 
   const getOverlayWindow = useCallback((): TauriWindow => {
     if (!windowRef.current) {
@@ -202,6 +230,7 @@ export function HUD() {
       }
       removeDragListeners()
       clearWatchdog()
+      clearHoldTimer()
       document.documentElement.classList.remove('overlay-html')
     }
   }, [])
@@ -215,6 +244,10 @@ export function HUD() {
 
     const removeAudioLevelListener = window.electronAPI.onAudioLevel((level: number) => {
       setAudioLevel(level)
+      // 只要有可闻声音就刷新「最后说话时刻」；静音自动停止据此判定。
+      if (level >= SILENCE_LEVEL_THRESHOLD) {
+        lastVoiceAtRef.current = Date.now()
+      }
     })
 
     return () => {
@@ -225,12 +258,40 @@ export function HUD() {
 
   useEffect(() => {
     statusRef.current = overlayState.status
+    // 会话一旦离开录音态（正常停止 / 被 Rust 侧结束），latch 标记必须复位，否则后续轻点
+    // 会被误当成「停止一个已不存在的 latch 会话」而永远无效。仅在无手势在途时清除：
+    // 若用户正按下（pending），让手势自己解析（startedLatched 反映手势起点，提前清掉会
+    // 让松手被误判成一次新的 latch 启动）。
+    if (overlayState.status !== 'recording' && dragRef.current.phase === 'idle') {
+      latchedRef.current = false
+      dragRef.current = { ...dragRef.current, latched: false, startedLatched: false }
+    }
     // 窗口已缩到内容大小（见 scheduleOverlayResize），整窗即胶囊、无死区，所有
     // 状态保持可点击（待机 = 按住说话 / 拖拽，录音 / 处理 = 取消按钮）。不做 hover 穿透：
     // Tauri `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，一旦
     // 穿透 mouseenter 不再可达，胶囊（含取消按钮）会永久点不到。
     window.electronAPI.setIgnoreMouseEvents(false)
   }, [overlayState.status])
+
+  // latched 会话的静音自动停止：仅对 latch（已松手持续录音）生效，PTT 按住不受影响。
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (
+        !isSilenceAutoStopDue({
+          latched: latchedRef.current,
+          lastVoiceAt: lastVoiceAtRef.current,
+          now: Date.now(),
+        })
+      ) {
+        return
+      }
+      latchedRef.current = false
+      dragRef.current = { ...dragRef.current, latched: false, startedLatched: false }
+      holdActiveRef.current = false
+      window.electronAPI.stopSession().catch(() => {})
+    }, 1000)
+    return () => clearInterval(id)
+  }, [])
 
   /**
    * 状态 / 文案变化后测量胶囊实际内容尺寸，把 overlay 窗口缩到内容大小
@@ -265,9 +326,11 @@ export function HUD() {
     scheduleOverlayResize()
   })
 
-  /** pointerdown：按住说话（左键 / 中键）。语义与 PTT 心智一致，绝不做切换。 */
+  /**
+   * 启动会话（start-session 命令）。轻点 latch 与按住 PTT 都经此；会话结束由 stop/cancel 负责。
+   * 状态机已保证只会在待机（或已 latch 会话的「停止」手势）语境下发出该命令。
+   */
   const handleHoldStart = () => {
-    if (statusRef.current !== 'idle') return
     if (holdActiveRef.current) return
     holdActiveRef.current = true
     window.electronAPI.startSession().catch(() => {
@@ -275,15 +338,18 @@ export function HUD() {
     })
   }
 
-  /** pointerup / pointercancel / pointerleave：只结束本胶囊发起的会话。 */
+  /** 停止会话并进入识别（stop-session 命令）。 */
   const handleHoldEnd = () => {
     if (!holdActiveRef.current) return
     holdActiveRef.current = false
     window.electronAPI.stopSession().catch(() => {})
   }
 
+  /** 取消会话（cancel-session 命令 / 取消按钮）：静默丢弃，同时清掉 latch 标记。 */
   const handleCancel = () => {
     holdActiveRef.current = false
+    latchedRef.current = false
+    dragRef.current = { ...dragRef.current, latched: false, startedLatched: false }
     window.electronAPI.cancelSession()
   }
 
@@ -306,8 +372,7 @@ export function HUD() {
         dragRef.current,
         Date.now(),
       )
-      dragRef.current = nextState
-      executeDragCommandsRef.current(cmds)
+      applyDragResult(nextState, cmds)
     }
     const up = (event: PointerEvent) => {
       const [nextState, cmds] = onPointerUp(
@@ -315,8 +380,7 @@ export function HUD() {
         dragRef.current,
         Date.now(),
       )
-      dragRef.current = nextState
-      executeDragCommandsRef.current(cmds)
+      applyDragResult(nextState, cmds)
     }
     const cancel = (event: PointerEvent) => {
       const [nextState, cmds] = onPointerCancel(
@@ -324,13 +388,11 @@ export function HUD() {
         dragRef.current,
         Date.now(),
       )
-      dragRef.current = nextState
-      executeDragCommandsRef.current(cmds)
+      applyDragResult(nextState, cmds)
     }
     const blur = () => {
       const [nextState, cmds] = onWindowBlur(dragRef.current)
-      dragRef.current = nextState
-      executeDragCommandsRef.current(cmds)
+      applyDragResult(nextState, cmds)
     }
 
     currentMoveHandlerRef.current = move
@@ -403,8 +465,7 @@ export function HUD() {
     const delay = Math.max(0, deadline - Date.now())
     watchdogTimeoutRef.current = setTimeout(() => {
       const [nextState, cmds] = onWatchdog(dragRef.current, Date.now())
-      dragRef.current = nextState
-      executeDragCommandsRef.current(cmds)
+      applyDragResult(nextState, cmds)
     }, delay)
   }
 
@@ -413,6 +474,28 @@ export function HUD() {
     if (watchdogTimeoutRef.current !== null) {
       clearTimeout(watchdogTimeoutRef.current)
       watchdogTimeoutRef.current = null
+    }
+  }
+
+  /**
+   * 启动按住阈值定时器：按下满 HOLD_LATCH_MAX_MS 仍未松手 / 未拖拽 → 状态机进入 holding
+   * 并开始 PTT 录音（onHoldTimer）。拖拽或松手都会由状态机清除它。
+   */
+  const startHoldTimer = (deadline: number) => {
+    clearHoldTimer()
+    const delay = Math.max(0, deadline - Date.now())
+    holdTimerRef.current = setTimeout(() => {
+      holdTimerRef.current = null
+      const [nextState, cmds] = onHoldTimer(dragRef.current, Date.now())
+      applyDragResult(nextState, cmds)
+    }, delay)
+  }
+
+  /** 清除按住阈值定时器。 */
+  const clearHoldTimer = () => {
+    if (holdTimerRef.current !== null) {
+      clearTimeout(holdTimerRef.current)
+      holdTimerRef.current = null
     }
   }
 
@@ -447,6 +530,12 @@ export function HUD() {
         case 'clear-watchdog':
           clearWatchdog()
           break
+        case 'start-hold-timer':
+          startHoldTimer(cmd.deadline)
+          break
+        case 'clear-hold-timer':
+          clearHoldTimer()
+          break
         case 'suppress-resize':
           // resizeSuppressed 已在状态机状态中更新，无需额外动作
           break
@@ -468,12 +557,15 @@ export function HUD() {
   executeDragCommandsRef.current = executeDragCommands
 
   /**
-   * 待机胶囊 pointerdown：同时启动按住说话与拖拽监听。
+   * 待机胶囊 pointerdown：开始一次指针手势（**不立即开录**）。
    *
    * 监听挂在**整个 overlay 窗口**的容器上（而不是只挂在胶囊 `<button>` 上）：窗口按
    * 内容尺寸缩放后胶囊四周仍有不可见的窗口空白，且 `<button>` 的圆角本身也会让
    * 四角不参与命中；只挂胶囊会让落在胶囊边缘/上下的按下「完全无反应」（0.5.1 回归
-   * 缺陷现象之一）。整窗即热区后，点在窗口内任意位置都能启动会话。
+   * 缺陷现象之一）。整窗即热区后，点在窗口内任意位置都能开始手势。
+   *
+   * 手势结果由状态机裁决：轻点 → 松手时 latch 启动并保持；右键 / 中键同左键；位移超过
+   * 阈值 → 拖拽移窗（绝不启动会话）；停留过阈值 → 按住 PTT。
    */
   const handleIdlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     const [nextState, cmds] = onPointerDown(
@@ -487,7 +579,6 @@ export function HUD() {
       Date.now(),
       statusRef.current,
     )
-    dragRef.current = nextState
 
     if (nextState.pointerId !== null) {
       try {
@@ -497,7 +588,7 @@ export function HUD() {
       }
     }
 
-    executeDragCommands(cmds)
+    applyDragResult(nextState, cmds)
 
     // 异步解析窗口起始物理坐标与缩放因子，供拖拽移动计算使用。
     if (nextState.phase === 'pending') {
@@ -510,12 +601,17 @@ export function HUD() {
     }
   }
 
-  /** 待机胶囊双击：重置到默认底部居中位置（仅待机态；录音 / 处理态不响应）。 */
+  /**
+   * 双击复位：重置到默认底部居中位置。
+   *
+   * 「第 1 击 latch、第 2 击静默取消并复位」的链路里，dblclick 触发时 overlay 仍可能处于
+   * recording（第 2 击的 cancel-session 尚未回传），因此**不能**用 status 作门禁。真正的
+   * 判据是 `onDoubleClick` 对 lastTap 的「距上次轻点 ≤ DOUBLE_CLICK_MAX_MS」检查——lastTap
+   * 只由轻点写入，PTT 按住 / 处理中不会留下新鲜 lastTap，故不会被误复位。
+   */
   const handleIdleDoubleClick = () => {
-    if (statusRef.current !== 'idle') return
     const [nextState, cmds] = onDoubleClick(dragRef.current, Date.now())
-    dragRef.current = nextState
-    executeDragCommands(cmds)
+    applyDragResult(nextState, cmds)
   }
 
   const { status, message, processingStage, transcript = '' } = overlayState
@@ -535,8 +631,6 @@ export function HUD() {
     <div
       className="pointer-events-auto fixed inset-0 flex items-center justify-center"
       onPointerDown={handleIdlePointerDown}
-      onPointerUp={handleHoldEnd}
-      onPointerCancel={handleHoldEnd}
       onDoubleClick={handleIdleDoubleClick}
       onContextMenu={(event) => event.preventDefault()}
     >
@@ -549,8 +643,7 @@ export function HUD() {
             type="button"
             className={cn(
               'pointer-events-auto flex h-9 select-none items-center gap-2 rounded-full',
-              'bg-neutral-950/70 px-3.5 ring-1 ring-white/[0.06] backdrop-blur-xl touch-none',
-              'shadow-[0_12px_32px_-12px_rgba(0,0,0,0.65)]',
+              'bg-neutral-950/85 px-3.5 ring-1 ring-white/[0.06] touch-none',
               'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-95',
               isVisible
                 ? 'translate-y-0 scale-100 opacity-100 blur-0'
@@ -568,16 +661,12 @@ export function HUD() {
           <div
             className={cn(
               'pointer-events-auto relative flex h-[52px] w-[268px] items-center gap-2.5 rounded-full',
-              'bg-neutral-950/85 px-3 ring-1 ring-white/[0.06] backdrop-blur-xl',
-              'shadow-[0_12px_32px_-12px_rgba(0,0,0,0.65),0_4px_10px_-4px_rgba(0,0,0,0.4)]',
+              'bg-neutral-950/90 px-3 ring-1 ring-white/[0.06]',
               'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]',
               isVisible
                 ? 'translate-y-0 scale-100 opacity-100 blur-0'
                 : 'translate-y-2 scale-95 opacity-0 blur-sm',
             )}
-            onPointerUp={handleHoldEnd}
-            onPointerCancel={handleHoldEnd}
-            onPointerLeave={handleHoldEnd}
           >
             {/* Left status badge */}
             {status === 'recording' && <RecordingBadge audioLevel={audioLevel} />}
