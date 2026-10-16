@@ -18,7 +18,9 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   label 覆盖 main/overlay/session 三窗（session 复用 `harden_overlay_window` 同款
   硬化——同形同需求，漏掉即重蹈蓝边框/白条两个 bug），setup 时对现有窗口做 Windows
   焦点框硬化首遍，并初始化
-  鼠标中键 PTT（`mouse.rs`）与常驻待机 HUD 胶囊（`commands::show_overlay_idle`）。
+  鼠标中键 PTT（`mouse.rs`）与常驻待机 HUD 胶囊（`commands::show_overlay_idle`）。`run()`
+  **第一行**调 `windowing::enable_transparent_webview_background()`（必须在任何窗口/WebView
+  创建之前，把 WebView2 垫底层设为全透明，见 `windowing` 条目「白闪」）。
 - `src/windowing.rs` - 窗口生命周期共用逻辑：Windows 焦点框硬化（overlay：
   `WS_EX_NOACTIVATE` + `DWMWA_BORDER_COLOR=NONE` 幂等重施；**另剥离原生标题栏/边框
   样式位** `WS_CAPTION|WS_SYSMENU|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX` 并配
@@ -45,8 +47,21 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   边框被染成近黑色而非去除，令整项修复静默失效。**另注**：`DWMWA_*` 属性只需已启用的
   `Win32_Graphics_Dwm` feature；**不复用** tao 建窗时的 `DwmEnableBlurBehindWindow`
   空区域透明（`DWM_BLURBEHIND`/`CreateRectRgn` 需 `Win32_Graphics_Gdi`，当前未启用）；
-  `tauri.conf.json` 的 `noRedirectionBitmap` 在本版 Tauri 是**死配置**
-  （tauri-runtime-wry 从未调用 tao 的 `with_no_redirection_bitmap`），不要依赖。**WebView2 幽灵标题栏（0.5.4 残留白条的根因）**：样式剥离 + DWM 清理之后，胶囊
+  `tauri.conf.json` 的 `noRedirectionBitmap` 在本版 Tauri 是**活配置**（0.5.7 核实更正：
+  `tauri-runtime-wry` 2.12.0 `lib.rs` 建窗链逐窗传 `config.no_redirection_bitmap`，落到
+  tao 0.37.1 的 `with_no_redirection_bitmap` → `WS_EX_NOREDIRECTIONBITMAP`；此前 README
+  记为「死配置」有误），且 tauri 官方文档把它列为**透明窗白闪**的官方规避手段
+  （`transparent()` / `no_redirection_bitmap()` 两处 doc 原文："can avoid the white flash
+  that may appear before the webview content is rendered when using a transparent
+  window"）；该字段只在 Windows 生效（mac/Linux 忽略）。**但 0.5.7 评估后否决、不启用**
+  （沿用「评估但推迟」的记录风格）：tauri 文档推荐它规避白闪，但把它打开会让窗口失去重定向
+  表面（DComp-only），而 **wry 的 WebView2 容器正是子窗**（`create_container_hwnd` 用
+  `WS_CHILD | WS_CLIPCHILDREN` 建 `WRY_WEBVIEW` 子窗）。两条反证：① Sciter 官方论坛实证——
+  `WS_EX_NOREDIRECTIONBITMAP`（DComp）窗口"highly probably affects child window rendering"，
+  他们被迫关掉 DComp 才恢复子窗渲染；② wry 自身历史——#1513 曾默认给 WebView2 传
+  `--enable-features=RemoveRedirectionBitmap`（浏览器旗标变体）→ #1525 多平台崩溃 →
+  **#1572 又移除**（"due to crashes on Insider builds"）。取舍：**空白胶囊（功能破坏）> 闪烁
+  （外观）**，故 0.5.7 改走「不重建表面 / 不可见重建」路线（见下文「白闪」②③），不碰透明机制。**WebView2 幽灵标题栏（0.5.4 残留白条的根因）**：样式剥离 + DWM 清理之后，胶囊
   上方仍可能出现一条浅色横条（横条文字 = 页面 `<title>`，即「芷若」）、随胶囊拖动、并在窗口
   激活 / 聚焦切换时出现、点胶囊（触发形变 = resize）或切走后又消失。它**不是窗口样式**
   （`GWL_STYLE` 已无 `WS_CAPTION`，正是两轮样式剥离除不掉的原因），而是 **WebView2 运行时
@@ -55,14 +70,32 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   「高度 +1 再还原」的 1px 轻推 —— 带 `AtomicBool` 重入守卫（轻推会触发 `Resized`，若
   `Resized` 处理器也轻推即死循环），挂在每次 `overlay_show` / `session_show`
   （`show_overlay_window` / `show_session_window`）与
-  overlay/session/main 三窗口的 `Focused` 事件（`lib.rs`，激活路径）上；胶囊隐藏时跳过。另
+  overlay/session/main 三窗口的 `Focused` 事件（`lib.rs`，激活路径）上；胶囊隐藏时跳过。
+  **0.5.7 起 `show_overlay_window` 只在窗口「此前不可见」时才 show/硬化/轻推**（见
+  `commands.rs` 条目）：常驻待机胶囊本就一直可见，会话启动再跑一遍等于对可见透明窗做一次
+  无谓尺寸变化，正是白闪来源。另
   `clear_dwm_window_backdrop` 的三个 `DwmSetWindowAttribute` 返回值由 `let _ =` 改为查
   `HRESULT`、`< 0` 时 `log::warn!`（旧系统会静默拒绝 `DWMWA_SYSTEMBACKDROP_TYPE` 等新
-  属性），便于诊断。**后备方案（评估后未采用）**：去掉 Windows 上 tao 的 `.transparent(true)`
-  标志、改调 `DwmEnableBlurBehindWindow` + 启动前设 `WEBVIEW2_DEFAULT_BACKGROUND_COLOR=00000000`
-  以同样恢复透明（s1gh/RLToolkit 方案，可从源头消除触发条件）——未采用原因：`transparent` 在
-  `tauri.conf.json` 无法按平台分支（会破坏 Linux/macOS 透明）、需新增 `Win32_Graphics_Gdi`
-  feature 与启动前环境变量、且无法在本环境 GUI 实测，风险高于收益；WebView2 上游已修。主窗口隐藏到托盘后延迟 5 分
+  属性），便于诊断。**白闪（0.5.6 引入、0.5.7 修复）**：轻推 = **可见透明窗上的尺寸变化**；
+  而透明窗一旦「表面被重建」（`hide()`/`show()`，或 bounds 变化），WebView2/DWM 可能在页面
+  内容就位前先呈现一帧，呈现的正是 WebView2 的 `DefaultBackgroundColor` —— 默认**白色**
+  （MSDN："renders this color when there is no web content loaded"）或窗口自身表面。于是 0.5.6
+  用轻推换掉了白条却换来白闪，三条时序都对得上：① 点胶囊 → `start_session_internal` 重跑
+  `overlay_show` 并对**已可见**的 overlay 轻推；② session 窗每次会话 `show()` 后紧跟一次轻推
+  （= 可见态 bounds 变更，WebView2Feedback#5607 文档化白帧）；③ session 窗 `hide()` 本身也会
+  闪（tauri#14515 "Creating a hidden transparent window results in a white flash when
+  displayed"）。0.5.7 三管齐下（**不动 `transparent`**，故 mac/Linux 透明不受影响）：
+  ① `show_overlay_window` 在窗口**已可见**时不再 show/硬化/轻推（见 `commands.rs` 条目）；
+  ② `show_session_window` 把轻推挪到 `show()` **之前**（定位 → 轻推 → show，隐藏态重绘不可见；
+  session 窗 `WS_EX_NOACTIVATE` 且不可拖拽，#14764 的两个触发面都不占，show 后轻推无可见职责）；
+  ③ `hide_session` 先挪屏外（`session_park_position`，按真实显示器布局并集右下角再外推 1000px，
+  非硬编码 -9999）再 `hide()`，隐藏帧物理不可见（tauri#14515 报告者实测配方）。另
+  `windowing::enable_transparent_webview_background` 在 `run()` 第一行设
+  `WEBVIEW2_DEFAULT_BACKGROUND_COLOR=00000000`（进程环境变量，WebView2 环境创建时读取一次）
+  把垫底层改成全透明——MSDN 明示**只走属性**（wry 的 `SetDefaultBackgroundColor`，建窗时已设
+  透明）"can still leave the app with a white flicker before the DefaultBackgroundColor
+  property takes effect. Setting the color via environment variable solves this issue."；
+  已存在的同名环境变量不覆盖（尊重外部覆盖）。主窗口隐藏到托盘后延迟 5 分
   钟 `destroy()` 整个 main WebView 进程，5 分钟内重开则通过 generation 计数取消销毁；
   `ensure_main_window` 幂等重建（label 仍为 `"main"`，尺寸/位置/decorations 与
   `tauri.conf.json` 的 main 条目一致），`open_main_window` 为所有打开路径（托盘
@@ -91,85 +124,101 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `position_overlay_bottom_center` / `position_overlay`，底部居中数学抽成纯函数
   `bottom_center_in` 并单测），先定位后显示，并在 show
   前后幂等重施 overlay 硬化（常驻 show 路径同样走 `overlay_show`，硬化必生效）；
-  `overlay_show` 尊重 `app.overlayVisible`（托盘隐藏后自动 show 跳过，胶囊保持隐藏），
-  但托盘入口走 `show_overlay_forced` 强制复开，且 overlay 窗口缺失时经
-  `windowing::ensure_overlay_window` 在工作线程重建。每次 show/hide 都把
-  `app.overlayVisible` 与托盘勾选态同步到真实状态（`hide_overlay` 同步隐藏语义；
-  同步函数可从 overlay 重建工作线程调用：配置写盘走 `config.rs` 的 `CONFIG_LOCK`，
-  托盘勾选态变更经 `run_on_main_thread` 派回主线程，失败记 `log::warn!`）。
-  **会话胶囊（`session` 窗，0.5.6 解耦）**：`start_session_internal` 在每次会话
-  成功启动后（无论键盘 PTT / 鼠标中键 / hold / latch 触发）无条件
-  `session_show`——**与 overlay 显隐、拖拽位置完全无关**（托盘隐藏悬浮胶囊后
-  触发录音，下方居中大胶囊照常出现）；每次 show 把 session 窗一次性定位到
-  光标所在监视器工作区底部居中（`position_session_bottom_center`，复用同一
-  `bottom_center_in`；会话期间不再移动，且**绝不触碰 overlay 窗几何**——hold
-  手势在指针下不受干扰）。隐藏收口唯一：`overlay_emit_idle`（回 standby 的
-  单一漏斗：成功/错误展示 1.2s 超时 `overlay_idle_later`、取消 `cancel_session`、
-  误触静默、托盘强制 show 时无会话、翻译反馈超时）先 `hide_session` 再广播
-  idle；`hide_session` 不带任何 flag 同步（与 `hide_overlay` 彻底解耦）。翻译
-  反馈（`translate.rs::emit_overlay`）经 `session_show_for_feedback` 点亮
-  session 窗，会话进行中自动跳过（不重锚定）。会话窗口缺失时经
-  `windowing::ensure_session_window` 在工作线程重建。
-  `set_overlay_size` 命令（渲染层契约：invoke 名 `set_overlay_size`、参数
-  `{ width, height }`，逻辑像素）把 overlay `set_size` 为夹取后的尺寸
-  （40..=400 × 32..=120）并经 `position_overlay` 保持持久化位置/底部居中。
-  `set_overlay_position` 命令（渲染层契约：invoke 名 `set_overlay_position`、参数
-  `x: f64 | null, y: f64 | null`，**物理像素**、直接来自窗口 `outerPosition()`，可选
-  `capsule: { width, height }` 为可见胶囊实际尺寸、**逻辑像素**（DOM
-  `offsetWidth/offsetHeight`））：拖拽落点按**胶囊可视区**吸附到所属显示器工作区最近的
-  边（左/右/上/下），落点为**半隐半现（抽屉式）**——胶囊**中线**压在工作区边界线上，
-  一半嵌进屏幕边、一半露出（`windowX = workLeft - capsuleOffsetX - capsuleW/2`，其余
-  三向同理；因 `capsuleOffset + capsule/2 = window/2`，落点与胶囊尺寸无关，待机/会话
-  两态胶囊共用同一中线、形变不跳位）。磁性阈值
-  `OVERLAY_SNAP_THRESHOLD = 48` 物理像素：胶囊边距所有工作区边都超过阈值则**不吸附**，
-  仅钳制（按胶囊中心）并按原地持久化。无 `capsule`（或 malformed——非数值 / 非有限 /
-  超出窗口尺寸，静默忽略）时回退旧的窗口外框吸附（间隙 10 物理像素、无阈值、整窗
-  钳制，行为不变）。吸附落点计算
-  抽成纯函数 `snap_overlay_position`（窗口尺寸/胶囊尺寸/候选位置/work area →
-  `SnapLanding { pos, edge }` 或 `None`；`edge` 即吸附到的 `left`/`right`/`top`/
-  `bottom`），单测覆盖两态胶囊四边中线贴边 ≤2px（半隐，且所报 edge 与目标边一致）、
-  超阈值不吸附、回退旧行为、malformed 校验与半隐坐标再钳制存活。落点钳制后移动窗口并
-  持久化到 `app.overlayPosition: {x, y}`，同时同批写 `app.overlayDocked`
-  （`"left"|"right"|"top"|"bottom"` 或 `null`；config.rs merge 字段级校验：未知字符串
-  忽略、`null` 清除）（多显示器/DPI 安全，与 `position_overlay_bottom_center`
-  同一套物理像素换算；钳制语义为**胶囊中心线**留在工作区内——中线贴边即半隐停靠位、
-  合法，show/托盘复开/重启重锚定绝不回退半隐坐标，中心出界才拉回且至少露出半胶囊）；
-  传 `null`（任一坐标）则 position 与 docked 一并清除并回到底部居中默认位
-  （默认/复位位走整窗钳制、**完整显示**，不经过吸附）。
-  **返回值** `Result<Option<String>, String>`（invoke 序列化为 JSON `string | null`，
-  旧调用忽略返回值、向后兼容）：吸附成功 → `Some(edge)`；超阈值仅钳制的落位与复位
-  分支 → `None`。渲染层据此切换待机胶囊形态（贴边 → 紧凑仅图标；拖拽一进入 dragging
-  即还原全形、松手 persist 返回值定夺），并经 `get_config` 读 `app.overlayDocked`
-  在重启后恢复同一形态。返回值与配置补丁由单测
-  `snap_reports_docked_edge_for_renderer_contract` /
-  `config_patches_persist_dock_state_with_position` 覆盖。
-  `OverlayFrame::apply` 在目标坐标与 `outer_position` 相同（±1 物理像素）时跳过
-  `set_position`：同坐标 SetWindowPos 无视觉效果但会进入窗口过程，而
-  `start_session_internal` 每次启动会话都途经此处且彼时可能仍有指针手势在途
-  （0.5.3 的 pointercancel 教训），故不得空放。`start_session_internal` 是 PTT / 中键 / HUD pointerdown 三路的统一
-  入口：仅 Idle / Completed / Error 可启动，Recording / Processing 一律拒绝并安静
-  失败（防止转写/润色的 Processing 窗口内按 PTT 顶掉在途会话造成孤儿录音）；
-  启动 / 停止 / 取消 / 出错路径都会清掉 mouse.rs 的中键会话 token。启动时同时
-  调度 Rust 侧 5 分钟会话看门狗（`spawn_session_time_watchdog`，与渲染层
-  `SESSION_MAX_DURATION_SECONDS` 的 `setTimeout` 同预算、双兜底）：到期仅当会话
-  id 未变、仍 `Recording` 且 `audio::session_time_limit_reached`（按 `started_at`
-  复核）判定过期时，走与渲染层定时器**相同**的 stop 管线（转写 + 注入，不走
-  cancel 丢弃音频；Rust 侧即可释放会话状态并使鼠标 token 失效，麦克风关闭仍由
-  渲染层收 `stop-recording` 事件完成）；与正常 stop 竞态时按会话 id 抢锁，抢不到
-  静默让路，绝不发"无录音"假 toast。stop 管线的「没有录到声音」按会话时长分流
-  （产品决策：误触/快速点击静默不报错）：无 PCM 且无 chunk 时，会话时长 <
-  `EMPTY_SESSION_QUIET_MS`（250ms；`getUserMedia` 出流通常需 ~100-200ms）判为误触，
-  静默 `Ok("")` 完成会话并直接回 idle（不 emit `error`/`transcription`、不弹 toast、
-  不写历史/统计，渲染层丢弃 `stop_session` 返回值故空串安全）；≥250ms 视为真实
-  麦克风故障，保留原「没有录到声音，请检查麦克风后重试。」错误。判定为纯函数
-  `empty_session_is_quiet`（附单测），时长在 stop 抢锁时按 `started_at` 采样，
-  不混入 flush 等待。
-  `overlay_idle_later` 为 `pub(crate)`，`translate.rs` 直接复用（1.2s 回 idle）。
-  `show_settings_window` 为 async 命令并经
-  `windowing::open_main_window` 打开/重建主窗口。`set_config` 在 rebind 失败时回滚
-  快捷键并返回 `{ config, hotkeyRolledBack }`（渲染层据此覆盖 hotkey 状态清除
-  dirty），并即时应用 `mouse.middleClickPtt`（`mouse.rs` 钩子安装/卸载）；
-  `set_hotkey_capture_active` 维护快捷键录制态守卫。
+  **0.5.7**：`show_overlay_window` 先查 `is_visible()`，\*\*已可见时只做 `position_overlay`
+  - flag 同步，不再 `show()` / 硬化 / 轻推**——会话启动每次都走这条路径，而轻推是可见透明窗
+    上的尺寸变化，正是白闪来源（硬化在首次显示时已施加、且由 `lib.rs` 的 `Focused` 处理器
+    每次激活重申；轻推只在可见性变化时有意义）；
+    `overlay_show` 尊重 `app.overlayVisible`（托盘隐藏后自动 show 跳过，胶囊保持隐藏），
+    但托盘入口走 `show_overlay_forced` 强制复开，且 overlay 窗口缺失时经
+    `windowing::ensure_overlay_window` 在工作线程重建。每次 show/hide 都把
+    `app.overlayVisible` 与托盘勾选态同步到真实状态（`hide_overlay` 同步隐藏语义；
+    同步函数可从 overlay 重建工作线程调用：配置写盘走 `config.rs` 的 `CONFIG_LOCK`，
+    托盘勾选态变更经 `run_on_main_thread` 派回主线程，失败记 `log::warn!`）。
+    **会话胶囊（`session` 窗，0.5.6 解耦）**：`start_session_internal` 在每次会话
+    成功启动后（无论键盘 PTT / 鼠标中键 / hold / latch 触发）无条件
+    `session_show`——**与 overlay 显隐、拖拽位置完全无关**（托盘隐藏悬浮胶囊后
+    触发录音，下方居中大胶囊照常出现）；每次 show 把 session 窗一次性定位到
+    光标所在监视器工作区底部居中（`position_session_bottom_center`，复用同一
+    `bottom_center_in`；会话期间不再移动，且**绝不触碰 overlay 窗几何**——hold
+    手势在指针下不受干扰）。**0.5.7 白闪修复的次序**：`show_session_window` 改为
+    `harden → position_session_bottom_center → clear_webview_ghost_titlebar（轻推）
+→ show()`——轻推（= bounds 变更）改在**隐藏态**执行，可见态不再有任何几何变更；
+    `set_size` 用 `SWP_NOMOVE`（tao）故不会移动窗口。隐藏收口唯一：`overlay_emit_idle`
+    （回 standby 的
+    单一漏斗：成功/错误展示 1.2s 超时 `overlay_idle_later`、取消 `cancel_session`、
+    误触静默、托盘强制 show 时无会话、翻译反馈超时）先 `hide_session` 再广播
+    idle；`hide_session` 不带任何 flag 同步（与 `hide_overlay` 彻底解耦），且 0.5.7 起
+    **先 `set_position(session_park_position)`（按全部显示器并集右下角外推 1000px 的屏外位）
+    再 `hide()`**，让 `hide()` 可能呈现的帧物理不可见（tauri#14515 报告者实测配方），
+    也使下次 show 从屏外起步（show 前必定重锚定）。翻译
+    反馈（`translate.rs::emit_overlay`）经 `session_show_for_feedback` 点亮
+    session 窗，会话进行中自动跳过（不重锚定）。会话窗口缺失时经
+    `windowing::ensure_session_window` 在工作线程重建。
+    `set_overlay_size` 命令（渲染层契约：invoke 名 `set_overlay_size`、参数
+    `{ width, height }`，逻辑像素）把 overlay `set_size` 为夹取后的尺寸
+    （40..=400 × 32..=120）并经 `position_overlay` 保持持久化位置/底部居中。
+    `set_overlay_position` 命令（渲染层契约：invoke 名 `set_overlay_position`、参数
+    `x: f64 | null, y: f64 | null`，**物理像素**、直接来自窗口 `outerPosition()`，可选
+    `capsule: { width, height }` 为可见胶囊实际尺寸、**逻辑像素**（DOM
+    `offsetWidth/offsetHeight`））：拖拽落点按**胶囊可视区**吸附到所属显示器工作区最近的
+    边（左/右/上/下），落点为**半隐半现（抽屉式）**——胶囊**中线**压在工作区边界线上，
+    一半嵌进屏幕边、一半露出（`windowX = workLeft - capsuleOffsetX - capsuleW/2`，其余
+    三向同理；因 `capsuleOffset + capsule/2 = window/2`，落点与胶囊尺寸无关，待机/会话
+    两态胶囊共用同一中线、形变不跳位）。磁性阈值
+    `OVERLAY_SNAP_THRESHOLD = 48` 物理像素，距离**带符号**（正 = 距边尚有间隙、0 = 恰好
+    接触、负 = 胶囊已溢出边外）：任一边距离 ≤ 阈值即吸附，**溢出（负距离）一律吸附**——
+    拖过头是比接触更强的贴边信号（0.5.7 修复：旧实现对距离取 `abs()`，溢出 >48px 反被
+    判为「离边太远」拒吸）；仅当距所有工作区边都超过阈值（且无溢出）才**不吸附**，
+    仅钳制（按胶囊中心）并按原地持久化。无 `capsule`（或 malformed——非数值 / 非有限 /
+    超出窗口尺寸，静默忽略）时回退旧的窗口外框吸附（间隙 10 物理像素、无阈值、整窗
+    钳制，行为不变）。吸附落点计算
+    抽成纯函数 `snap_overlay_position`（窗口尺寸/胶囊尺寸/候选位置/work area →
+    `SnapLanding { pos, edge }` 或 `None`；`edge` 即吸附到的 `left`/`right`/`top`/
+    `bottom`），单测覆盖两态胶囊四边中线贴边 ≤2px（半隐，且所报 edge 与目标边一致）、
+    四边溢出 10px / 100px 仍吸附该边（`overflowing_drop_still_docks_on_every_edge`；多边
+    同时满足时最强信号胜出、平手沿用 left > right > top > bottom）、超阈值不吸附、
+    回退旧行为、malformed 校验、半隐坐标再钳制存活与紧凑 docked 态四边复吸附不抖动。落点钳制后移动窗口并
+    持久化到 `app.overlayPosition: {x, y}`，同时同批写 `app.overlayDocked`
+    （`"left"|"right"|"top"|"bottom"` 或 `null`；config.rs merge 字段级校验：未知字符串
+    忽略、`null` 清除）（多显示器/DPI 安全，与 `position_overlay_bottom_center`
+    同一套物理像素换算；钳制语义为**胶囊中心线**留在工作区内——中线贴边即半隐停靠位、
+    合法，show/托盘复开/重启重锚定绝不回退半隐坐标，中心出界才拉回且至少露出半胶囊）；
+    传 `null`（任一坐标）则 position 与 docked 一并清除并回到底部居中默认位
+    （默认/复位位走整窗钳制、**完整显示**，不经过吸附）。
+    **返回值** `Result<Option<String>, String>`（invoke 序列化为 JSON `string | null`，
+    旧调用忽略返回值、向后兼容）：吸附成功（含溢出贴边）→ `Some(edge)`；超阈值仅钳制的
+    落位与复位分支 → `None`。渲染层据此切换待机胶囊形态（贴边 → 紧凑仅图标；拖拽一进入 dragging
+    即还原全形、松手 persist 返回值定夺），并经 `get_config` 读 `app.overlayDocked`
+    在重启后恢复同一形态。返回值与配置补丁由单测
+    `snap_reports_docked_edge_for_renderer_contract` /
+    `config_patches_persist_dock_state_with_position` 覆盖。
+    `OverlayFrame::apply` 在目标坐标与 `outer_position` 相同（±1 物理像素）时跳过
+    `set_position`：同坐标 SetWindowPos 无视觉效果但会进入窗口过程，而
+    `start_session_internal` 每次启动会话都途经此处且彼时可能仍有指针手势在途
+    （0.5.3 的 pointercancel 教训），故不得空放。`start_session_internal` 是 PTT / 中键 / HUD pointerdown 三路的统一
+    入口：仅 Idle / Completed / Error 可启动，Recording / Processing 一律拒绝并安静
+    失败（防止转写/润色的 Processing 窗口内按 PTT 顶掉在途会话造成孤儿录音）；
+    启动 / 停止 / 取消 / 出错路径都会清掉 mouse.rs 的中键会话 token。启动时同时
+    调度 Rust 侧 5 分钟会话看门狗（`spawn_session_time_watchdog`，与渲染层
+    `SESSION_MAX_DURATION_SECONDS` 的 `setTimeout` 同预算、双兜底）：到期仅当会话
+    id 未变、仍 `Recording` 且 `audio::session_time_limit_reached`（按 `started_at`
+    复核）判定过期时，走与渲染层定时器**相同\*\*的 stop 管线（转写 + 注入，不走
+    cancel 丢弃音频；Rust 侧即可释放会话状态并使鼠标 token 失效，麦克风关闭仍由
+    渲染层收 `stop-recording` 事件完成）；与正常 stop 竞态时按会话 id 抢锁，抢不到
+    静默让路，绝不发"无录音"假 toast。stop 管线的「没有录到声音」按会话时长分流
+    （产品决策：误触/快速点击静默不报错）：无 PCM 且无 chunk 时，会话时长 <
+    `EMPTY_SESSION_QUIET_MS`（250ms；`getUserMedia` 出流通常需 ~100-200ms）判为误触，
+    静默 `Ok("")` 完成会话并直接回 idle（不 emit `error`/`transcription`、不弹 toast、
+    不写历史/统计，渲染层丢弃 `stop_session` 返回值故空串安全）；≥250ms 视为真实
+    麦克风故障，保留原「没有录到声音，请检查麦克风后重试。」错误。判定为纯函数
+    `empty_session_is_quiet`（附单测），时长在 stop 抢锁时按 `started_at` 采样，
+    不混入 flush 等待。
+    `overlay_idle_later` 为 `pub(crate)`，`translate.rs` 直接复用（1.2s 回 idle）。
+    `show_settings_window` 为 async 命令并经
+    `windowing::open_main_window` 打开/重建主窗口。`set_config` 在 rebind 失败时回滚
+    快捷键并返回 `{ config, hotkeyRolledBack }`（渲染层据此覆盖 hotkey 状态清除
+    dirty），并即时应用 `mouse.middleClickPtt`（`mouse.rs` 钩子安装/卸载）；
+    `set_hotkey_capture_active` 维护快捷键录制态守卫。
 - `src/stats.rs` - 独立累计统计存储（`voice-key-stats.json`）：识别字符总数 /
   录音总时长 / 按日统计（`sessions` / `characters` / `audioMs`）只增不减，不受
   历史删除与 90 天裁剪影响——Home 的今日与近 N 日窗口也改读它（前端按日历日

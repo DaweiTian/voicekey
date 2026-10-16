@@ -43,6 +43,14 @@ fn clear_capsule_ghost_titlebars<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
 pub fn run() {
     env_logger::init();
 
+    // MUST be the first thing that happens: `WEBVIEW2_DEFAULT_BACKGROUND_COLOR`
+    // is consumed when the WebView2 environment is created, so it has to be in
+    // the process environment before any window/webview exists. It makes the
+    // layer WebView2 paints underneath the transparent capsules transparent
+    // instead of the default white, which is what flashes on `show()` /
+    // bounds changes (see `windowing::enable_transparent_webview_background`).
+    windowing::enable_transparent_webview_background();
+
     tauri::Builder::default()
         // Single-instance guard, registered FIRST: a second launch hands its
         // argv to the running instance and exits before any other plugin or

@@ -601,3 +601,48 @@ describe('docked compact capsule flush placement', () => {
     }
   })
 })
+
+// 0.5.7「拖过头也吸附」契约的渲染层一半：拖拽期间必须**原样**发出未钳制的目标坐标——
+// 包括已经溢出屏幕边外的坐标（负值 / 超大值）。贴边判定（任一边接触或溢出都吸附）与
+// 工作区钳制全部在 Rust `set_overlay_position` 里做；渲染层若先钳回屏内，Rust 永远看不到
+// 溢出态，溢出吸附就无从成立。松手一律经 flush-move + persist-position 把落点交还 Rust 判定。
+describe('drag emits raw unclamped positions (0.5.7 overflow snap contract)', () => {
+  it('passes overflowed coordinates past the right edge through untouched', () => {
+    let state = initialOverlayDragState()
+    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
+    state = setWinStart(state, { x: 1800, y: 500 }, 1.0)
+    // 越过拖拽阈值进入 dragging。
+    ;[state] = onPointerMove(moveEvent(1, { x: 120, y: 100 }), state, 10)
+    expect(state.phase).toBe('dragging')
+    // 再拖 300px：目标 x = 1800 + 320 = 2120，远超任何屏幕右边——原样发出、零钳制。
+    const [, cmds] = onPointerMove(moveEvent(1, { x: 420, y: 100 }), state, 20)
+    expect(moveCmdPos(cmds)).toEqual({ x: 2120, y: 500 })
+  })
+
+  it('passes negative coordinates (past the left edge) through unchanged', () => {
+    let state = initialOverlayDragState()
+    ;[state] = onPointerDown(downEvent(1, { x: 400, y: 100 }), state, 0, 'idle')
+    state = setWinStart(state, { x: 300, y: 200 }, 1.0)
+    // 越过拖拽阈值进入 dragging。
+    ;[state] = onPointerMove(moveEvent(1, { x: 380, y: 100 }), state, 10)
+    expect(state.phase).toBe('dragging')
+    // 目标 x = 300 + (−200 − 400) = −300（窗口已在屏外）——负坐标不得被钳成 0。
+    const [, cmds] = onPointerMove(moveEvent(1, { x: -200, y: 100 }), state, 20)
+    expect(moveCmdPos(cmds)).toEqual({ x: -300, y: 200 })
+  })
+
+  it('releases an overflowed drop through persist-position for Rust to judge', () => {
+    let state = initialOverlayDragState()
+    ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'idle')
+    state = setWinStart(state, { x: 1800, y: 500 }, 1.0)
+    ;[state] = onPointerMove(moveEvent(1, { x: 420, y: 100 }), state, 10)
+    expect(state.phase).toBe('dragging')
+    const [nextState, cmds] = onPointerUp(upEvent(1, { x: 420, y: 100 }), state, 20)
+    expect(nextState.phase).toBe('idle')
+    // 溢出落点同样走 persist-position：吸附/钳制在 Rust，渲染层不自行处置。
+    expect(cmdTypes(cmds)).toContain('persist-position')
+    expect(cmdTypes(cmds)).toContain('flush-move')
+    expect(hasCmd(cmds, 'cancel-session')).toBe(false)
+    expect(hasCmd(cmds, 'start-session')).toBe(false)
+  })
+})

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.7](https://github.com/BuildWithAIs/voicekey/compare/v0.5.6...v0.5.7) (2026-10-17)
+
+### Bug Fixes
+
+- **overlay:** 修复点击按住说话胶囊与首次开启录音时的白色闪烁——已可见的待机胶囊不再重复执行显示与 1px 尺寸轻推，会话大胶囊的轻推移至显示之前、隐藏前先移出屏幕外（tauri#14515 实测配方），并以环境变量将 WebView2 默认背景设为透明
+- **overlay:** 修复拖动胶囊溢出屏幕边缘后松手不自动吸附——吸附判定改用带符号距离，胶囊任一边接触或溢出屏幕边缘（含远超 48px 阈值的深度溢出）均吸附，多边同时贴边时按剩余优先级选择
+
 ## [0.5.6](https://github.com/BuildWithAIs/voicekey/compare/v0.5.5...v0.5.6) (2026-10-17)
 
 ### Features

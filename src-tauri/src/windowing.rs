@@ -37,6 +37,13 @@
 //!    capsule up. It gets the *same* Windows hardening as the overlay
 //!    ([`harden_overlay_window`]): same geometry shape, same no-activate /
 //!    no-frame / no-opaque-base requirements.
+//! 5. **WebView2 transparent background.** Both capsules are `transparent: true`
+//!    and the layer WebView2 paints *underneath* the page is white by default.
+//!    Whenever the window's surface is re-established - the `show()` of a hidden
+//!    capsule, or a bounds change such as the ghost-titlebar nudge - a white
+//!    frame can be presented before the page content for that state exists.
+//!    [`enable_transparent_webview_background`] removes that white source from
+//!    process start (the documented cure for exactly this flicker).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -407,6 +414,64 @@ pub fn harden_main_window<R: tauri::Runtime>(_window: &WebviewWindow<R>) {}
 /// there is nothing to clear elsewhere.
 #[cfg(not(target_os = "windows"))]
 pub fn clear_webview_ghost_titlebar<R: tauri::Runtime>(_window: &WebviewWindow<R>) {}
+
+/// Ask the WebView2 runtime for a **fully transparent** default background
+/// *before* it creates its environment, through the documented
+/// `WEBVIEW2_DEFAULT_BACKGROUND_COLOR` environment variable.
+///
+/// Why this exists (0.5.7 white-flash fix): the capsule windows are
+/// `transparent: true`, and the layer WebView2 paints *underneath* the page -
+/// its `DefaultBackgroundColor` - is **white** by default (MSDN: "The default
+/// value for this property is white"; it "renders this color when there is no
+/// web content loaded such as before the initial navigation or between
+/// navigations"). Every time the window's surface is (re)established the
+/// runtime/DWM can present a frame before the page content for that state
+/// exists, and what shows is that white default background. Two documented
+/// triggers match the reported symptoms exactly:
+///
+/// * **`show()` of a hidden transparent window** - the session capsule is
+///   `hide()`/`show()`n around every session (tauri#14515, "Creating a hidden
+///   transparent window results in a white flash when displayed"; also
+///   WebView2Feedback#5607: a white flash "when transforming the bounds of the
+///   WebView or any other changes to it ... When showing it it's fine").
+/// * **a bounds change** - our own ghost-titlebar nudge
+///   ([`clear_webview_ghost_titlebar`]) resizes the window by 1px on every show
+///   and focus change, which is a bounds change on a *visible* transparent
+///   window: the flash side effect of the 0.5.6 white-bar workaround.
+///
+/// `wry` already sets `DefaultBackgroundColor` to transparent for
+/// `transparent: true` windows, but it does so through the *property*
+/// (`ICoreWebView2ControllerOptions3::SetDefaultBackgroundColor` at controller
+/// creation, then the controller property again after). MSDN documents that
+/// this is not enough to avoid the flash: "There is a known issue with
+/// background color where just setting the color by property can still leave
+/// the app with a white flicker before the `DefaultBackgroundColor` property
+/// takes effect. Setting the color via environment variable solves this
+/// issue." The environment variable is read once, when the WebView2
+/// environment is created, so the transparent value is in force before the
+/// first frame is ever composited.
+///
+/// Value format (MSDN): hex ARGB, optionally `0x`-prefixed; fewer than 8 digits
+/// are treated as `00`-prefixed, i.e. transparent. `00000000` is fully
+/// transparent. A value that is already present in the environment is left
+/// untouched, so an operator/CI override always wins.
+///
+/// MUST run before any webview exists (the value is consumed when the WebView2
+/// environment is created), which is why `lib.rs` calls it as the first
+/// statement of `run()`.
+#[cfg(target_os = "windows")]
+pub fn enable_transparent_webview_background() {
+    const VAR: &str = "WEBVIEW2_DEFAULT_BACKGROUND_COLOR";
+    // Only set a default: never clobber an explicit override.
+    if std::env::var_os(VAR).is_none() {
+        std::env::set_var(VAR, "00000000");
+    }
+}
+
+/// Non-Windows stub: `WEBVIEW2_DEFAULT_BACKGROUND_COLOR` is a WebView2 (Windows)
+/// concept, and wry already keeps the other platforms' transparency intact.
+#[cfg(not(target_os = "windows"))]
+pub fn enable_transparent_webview_background() {}
 
 /// Apply the per-window hardening to every window that exists right now.
 ///

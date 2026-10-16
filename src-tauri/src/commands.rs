@@ -17,7 +17,8 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, State, WebviewWindow,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Monitor, PhysicalPosition, State,
+    WebviewWindow,
 };
 
 fn only_main_window(window: &WebviewWindow, action: &str) -> Result<(), String> {
@@ -64,11 +65,17 @@ const OVERLAY_BOTTOM_MARGIN: f64 = 48.0;
 const OVERLAY_EDGE_GAP: f64 = 10.0;
 
 /// Magnetic edge-snap threshold (`set_overlay_position`, physical px): a
-/// dropped capsule only snaps to a work-area edge when its *visible* edge is
-/// already within this distance of it. Farther away the drop is respected
-/// as-is (clamped into the work area) instead of flying to the nearest edge.
-/// Only the capsule-frame snap uses the threshold; the legacy window-frame
-/// fallback snaps unconditionally, exactly like pre-capsule builds.
+/// dropped capsule snaps to a work-area edge when its *visible* edge is within
+/// this distance of it **or has already crossed it**. The distance is signed
+/// (see [`snap_overlay_position`]): positive = gap inside the work area, zero =
+/// touching, negative = the capsule sticks out past the edge. Every negative
+/// value qualifies however deep the overflow — 0.5.7 regression fix: dragging
+/// the capsule *past* the edge ("拖过头") is a stronger edge signal than a
+/// touch and must dock, not get rejected by a `0..=48` window. Only a drop
+/// still clear of every edge by more than the threshold is respected as-is
+/// (clamped into the work area) instead of flying to the nearest edge. Only
+/// the capsule-frame snap uses the threshold; the legacy window-frame fallback
+/// snaps unconditionally, exactly like pre-capsule builds.
 const OVERLAY_SNAP_THRESHOLD: f64 = 48.0;
 
 /// Fallback HUD size (logical px) when the window reports no size.
@@ -396,8 +403,16 @@ struct SnapLanding {
 /// Since `capsuleOffset + capsule/2 = window/2`, the docked window position is
 /// the same for every capsule size: the standby and session capsules dock on
 /// the same center line and never jump when they morph.
-/// A drop farther than [`OVERLAY_SNAP_THRESHOLD`] from every edge returns
-/// `None` (keep the drop, just clamp it).
+/// The edge test uses **signed** distances (positive = gap inside the work
+/// area, zero = touching, negative = the capsule already sticks out past the
+/// edge) and the winning edge is the *smallest* signed distance — the closest
+/// touch or the deepest overflow. Any distance at or below
+/// [`OVERLAY_SNAP_THRESHOLD`] snaps, so touching and overflowing both dock
+/// (overflow is the stronger signal, 0.5.7); only a drop more than the
+/// threshold clear of every edge
+/// returns `None` (keep the drop, just clamp it). The decision is made on the
+/// raw dropped coordinates — clamping happens afterwards and never feeds back
+/// into it.
 ///
 /// Legacy window-frame snap (`capsule: None`): the dropped *point* picks the
 /// nearest edge and the *window* edge lands [`OVERLAY_EDGE_GAP`] from it,
@@ -444,13 +459,26 @@ fn snap_overlay_position(
     let offset_y = (window.1 - capsule_h) / 2.0;
     let capsule_left = x + offset_x;
     let capsule_top = y + offset_y;
-    let d_left = (capsule_left - area_x).abs();
-    let d_right = (area_x + area_w - (capsule_left + capsule_w)).abs();
-    let d_top = (capsule_top - area_y).abs();
-    let d_bottom = (area_y + area_h - (capsule_top + capsule_h)).abs();
+    // Signed distance from each capsule side to its work-area edge: positive =
+    // stops short of the edge (gap), zero = touching, negative = the capsule
+    // sticks out past it. Distances MUST stay signed (0.5.7 regression fix):
+    // `abs()` used to fold a deep overflow back into the `0..=48` window from
+    // the other side, so a capsule dragged half past the edge (e.g. 52 px out)
+    // read as "52 px away" and was rejected — "拖过头反而不吸".
+    let d_left = capsule_left - area_x;
+    let d_right = area_x + area_w - (capsule_left + capsule_w);
+    let d_top = capsule_top - area_y;
+    let d_bottom = area_y + area_h - (capsule_top + capsule_h);
+    // Smallest signed distance = strongest edge signal (closest touch or
+    // deepest overflow) and picks the edge; exact ties keep the historical
+    // priority left > right > top > bottom (the if-chain order below).
     let nearest = d_left.min(d_right).min(d_top).min(d_bottom);
-    // Magnetic threshold: a drop that is not already hugging an edge stays
-    // where it landed (the caller clamps it into the work area and persists).
+    // Magnetic threshold: snap when any side is within OVERLAY_SNAP_THRESHOLD
+    // of its edge **or has crossed it** (every negative value qualifies, no
+    // matter how deep the overflow). Only a drop still clear of every edge by
+    // more than the threshold stays where it landed (the caller clamps it into
+    // the work area and persists). The decision runs on the raw dropped
+    // coordinates — never on a clamped position.
     if nearest > OVERLAY_SNAP_THRESHOLD {
         return None;
     }
@@ -494,8 +522,12 @@ struct PlacedOverlay {
 /// when the renderer sent nothing usable): with it, snapping happens in the
 /// capsule's frame — the *visible capsule* docks **half-hidden** with its
 /// center line on the work-area edge (drawer style), not the 280×64 window
-/// frame around it. A drop beyond [`OVERLAY_SNAP_THRESHOLD`] from every edge
-/// is not snapped: it is only clamped and persisted as-is.
+/// frame around it. A drop more than [`OVERLAY_SNAP_THRESHOLD`] clear of
+/// every edge is not snapped: it is only clamped and persisted as-is. Touching
+/// or crossing an edge always docks (the distance test is signed — see
+/// [`snap_overlay_position`]); the snap decision runs on the raw dropped
+/// coordinates and the snapped landing overrides them, so a clamp can never
+/// pull an overflowed drop back inside before the edge is judged.
 fn place_overlay_snapped<R: tauri::Runtime>(
     app: &AppHandle<R>,
     win: &WebviewWindow<R>,
@@ -612,7 +644,30 @@ fn overlay_show<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) {
 
 /// Harden, position and show one existing overlay window, then sync the
 /// persisted visibility flag to what actually happened.
+///
+/// **0.5.7 white-flash fix:** when the capsule is *already* on screen - the
+/// normal case, since the standby capsule is shown once at startup and stays up,
+/// and every session start calls this path again through
+/// `start_session_internal` - the `show()` + ghost-titlebar nudge below are
+/// skipped. `show()` on an already visible window buys nothing, and the nudge is
+/// a **1px bounds change on a visible transparent window**, which is precisely
+/// what makes WebView2/DWM present a frame before the page content for the new
+/// bounds exists: the white flash reported after 0.5.6 (the nudge is the only
+/// geometry mutation 0.5.6 added on the click/start path). The nudge is only
+/// meaningful around a *visibility change*, because that is what re-creates the
+/// WebView2 surface and re-triggers the ghost titlebar (tauri#14764). The
+/// Windows hardening is skipped here too: it was applied when the window was
+/// shown, it is idempotent, and `lib.rs`'s `Focused` handler re-asserts it on
+/// every activation - the only event that redraws the DWM focus border.
 fn show_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>, win: &WebviewWindow<R>) {
+    let already_visible = win.is_visible().unwrap_or(false);
+    if already_visible {
+        // Keep the capsule anchored at its persisted spot (a no-op while the
+        // coordinates are unchanged) and leave its surface completely alone.
+        position_overlay(app, win);
+        sync_overlay_visibility_flag(app, true);
+        return;
+    }
     crate::windowing::harden_overlay_window(win);
     position_overlay(app, win);
     if win.show().is_ok() {
@@ -643,14 +698,31 @@ fn overlay_hide<R: tauri::Runtime>(app: &AppHandle<R>) {
 /// Position (once, at the fixed bottom-center spot of the cursor's monitor)
 /// and show one existing session capsule window, re-applying the Windows
 /// hardening around the show exactly like [`show_overlay_window`] does.
+///
+/// **0.5.7 white-flash fix - the order matters.** The ghost-titlebar nudge
+/// ([`crate::windowing::clear_webview_ghost_titlebar`]) is a *bounds change*, and
+/// a bounds change on a **visible** transparent window can make WebView2/DWM
+/// present a frame from underneath the page (WebView2Feedback#5607: a white flash
+/// "when transforming the bounds of the WebView") - the flash the user reported
+/// after 0.5.6. So the nudge now runs **before `show()`**, while the window is
+/// still hidden (and, because of [`hide_session`], still parked off-screen): the
+/// repaint it forces cannot be seen, and the window is shown already clean.
+///
+/// The old post-`show()` nudge had no visible benefit to lose: the session
+/// capsule is `WS_EX_NOACTIVATE` (it never activates) and is never dragged, so
+/// neither of the ghost titlebar's triggers (drag / focus change, tauri#14764)
+/// applies to it once it is on screen - and the 0.5.6 field test reported only a
+/// background flash on this window, never a bar. Order is geometry-safe:
+/// `set_size` keeps the window's position (tao uses `SWP_NOMOVE`), so anchoring
+/// first and nudging second cannot move the capsule.
 fn show_session_window<R: tauri::Runtime>(app: &AppHandle<R>, win: &WebviewWindow<R>) {
     crate::windowing::harden_overlay_window(win);
+    // 1) anchor at the target spot, 2) clear the stale WebView2 layer while the
+    // window is hidden (invisible repaint), 3) show the already-clean window.
     position_session_bottom_center(app, win);
+    crate::windowing::clear_webview_ghost_titlebar(win);
     if win.show().is_ok() {
         crate::windowing::harden_overlay_window(win);
-        // Same WebView2 144+ ghost-titlebar guard as the overlay show path
-        // (tauri#14764); guarded and idempotent.
-        crate::windowing::clear_webview_ghost_titlebar(win);
     }
 }
 
@@ -677,7 +749,48 @@ fn session_show<R: tauri::Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Off-screen "park" position for the session capsule while it is hidden.
+///
+/// Why this exists (0.5.7 white-flash fix): hiding/showing a **transparent**
+/// WebView2 window can present a frame from the layer underneath the page
+/// (WebView2's white default background / the window's own surface) before the
+/// content for the new state exists - tauri#14515, "Creating a hidden transparent
+/// window results in a white flash when displayed". The reporter's verified
+/// workaround is to park the window **outside every monitor before hiding it**,
+/// so whatever frame is presented is physically invisible.
+///
+/// The park point is derived from the real monitor layout (the union of every
+/// monitor, pushed past its bottom-right corner) instead of the issue's
+/// hard-coded `-9999, -9999`: a wide multi-monitor wall can extend past `-9999`
+/// and would drag a hard-coded park point back onto a screen. Falls back to the
+/// historical constant only when the monitor list is unavailable.
+fn session_park_position<R: tauri::Runtime>(app: &AppHandle<R>) -> PhysicalPosition<i32> {
+    let monitors = app.available_monitors().unwrap_or_default();
+    let (mut right, mut bottom) = (i32::MIN, i32::MIN);
+    for monitor in &monitors {
+        let pos = monitor.position();
+        let size = monitor.size();
+        right = right.max(pos.x.saturating_add(size.width as i32));
+        bottom = bottom.max(pos.y.saturating_add(size.height as i32));
+    }
+    if right == i32::MIN || bottom == i32::MIN {
+        // No monitor information: fall back to the documented constant.
+        return PhysicalPosition::new(-9999, -9999);
+    }
+    // 1000 physical px past the virtual desktop's bottom-right corner: far
+    // outside every work area, and still a valid i32.
+    PhysicalPosition::new(right.saturating_add(1000), bottom.saturating_add(1000))
+}
+
 /// Hide the session capsule window (session ended / returned to standby).
+///
+/// **0.5.7 white-flash fix:** the window is parked outside every monitor
+/// ([`session_park_position`]) *before* it is hidden, so the frame that `hide()`
+/// can present on a transparent window is physically invisible (tauri#14515's
+/// reporter: "there was still a white screen when the window was hidden. To fix
+/// that, I first moved the window off-screen ... this eliminated the hidden white
+/// screen"). It also means the next `session_show` starts from an off-screen
+/// position; [`show_session_window`] always re-anchors before showing.
 ///
 /// Unlike [`overlay_hide`] this never touches the overlay or its persisted
 /// visibility flag — the two windows are fully decoupled. Public for the
@@ -685,6 +798,7 @@ fn session_show<R: tauri::Runtime>(app: &AppHandle<R>) {
 /// renderer close into a hide.
 pub fn hide_session<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some(win) = app.get_webview_window(crate::windowing::SESSION_WINDOW_LABEL) {
+        let _ = win.set_position(session_park_position(app));
         let _ = win.hide();
     }
 }
@@ -1710,8 +1824,8 @@ fn overlay_reset_patch() -> serde_json::Value {
 /// **Return value** (`Result<Option<String>, String>` → JSON `string | null`,
 /// backwards compatible: older callers ignore it): `Some(edge)` with
 /// `"left" | "right" | "top" | "bottom"` when the drop snapped to that
-/// work-area edge (docked), `None` when the drop only got clamped (beyond
-/// [`OVERLAY_SNAP_THRESHOLD`]) **and** for the reset path. The renderer maps
+/// work-area edge (docked), `None` when the drop only got clamped (more than
+/// [`OVERLAY_SNAP_THRESHOLD`] clear of every edge) **and** for the reset path. The renderer maps
 /// it onto the compact idle capsule: docked → icon only, otherwise the full
 /// "hold to talk" capsule. The same decision is persisted as
 /// `app.overlayDocked` (see [`overlay_position_patch`]) so the compact shape
@@ -1723,9 +1837,11 @@ fn overlay_reset_patch() -> serde_json::Value {
 /// capsule **half-hidden** (drawer style: its center line lands on the
 /// work-area edge — half embedded in the screen edge, half visible; see
 /// [`snap_overlay_position`]); without it (legacy / malformed) the window
-/// frame snaps [`OVERLAY_EDGE_GAP`] from the edge as before. A drop beyond
-/// [`OVERLAY_SNAP_THRESHOLD`] is not snapped — only clamped (by the capsule
-/// center, so a half-hidden position is legal) and persisted where it landed.
+/// frame snaps [`OVERLAY_EDGE_GAP`] from the edge as before. A drop whose
+/// capsule is more than [`OVERLAY_SNAP_THRESHOLD`] clear of every edge is not
+/// snapped — only clamped (by the capsule center, so a half-hidden position is
+/// legal) and persisted where it landed; touching or crossing an edge always
+/// docks (signed distance test, see [`snap_overlay_position`]).
 #[tauri::command]
 pub fn set_overlay_position(
     window: WebviewWindow,
@@ -2188,5 +2304,100 @@ mod tests {
         let reset = overlay_reset_patch();
         assert!(reset["app"]["overlayPosition"].is_null());
         assert!(reset["app"]["overlayDocked"].is_null());
+    }
+
+    /// 0.5.7 regression (user report "拖过头反而不吸"): a dropped capsule whose
+    /// side has **crossed** a work-area edge must dock on that edge instead of
+    /// being rejected. The old `abs()` distance folded an overflow back into
+    /// the `0..=48` window from the other side, so any overflow deeper than 48
+    /// px (e.g. the capsule half past the edge = 52 px) read as "far away" and
+    /// returned `None`. Signed distances fix it: every negative distance
+    /// qualifies, however deep — overflow is a stronger edge signal than a
+    /// touch. Covered here for all four edges at two depths (10 px past = the
+    /// user's "拖过头 20px" scenario band; 100 px past = far beyond the 48
+    /// threshold) and both capsule states, and each landing must survive the
+    /// show-path re-clamp (the decision runs on the raw dropped coordinates).
+    #[test]
+    fn overflowing_drop_still_docks_on_every_edge() {
+        let frame = OverlayFrame {
+            area_x: AREA.0,
+            area_y: AREA.1,
+            area_w: AREA.2,
+            area_h: AREA.3,
+            window_w: WINDOW.0,
+            window_h: WINDOW.1,
+            monitor_scale: 1.0,
+            window_scale: 1.0,
+        };
+        for overhang in [10.0, 100.0] {
+            for edge in ["left", "right", "top", "bottom"] {
+                for cap in [IDLE_CAPSULE, SESSION_CAPSULE] {
+                    let ox = (WINDOW.0 - cap.0) / 2.0;
+                    let oy = (WINDOW.1 - cap.1) / 2.0;
+                    // The capsule's target side sits `overhang` px *outside*
+                    // the work-area edge (window coords, capsule centered).
+                    let drop = match edge {
+                        "left" => (AREA.0 - overhang - ox, 500.0),
+                        "right" => (AREA.0 + AREA.2 + overhang - ox - cap.0, 500.0),
+                        "top" => (900.0, AREA.1 - overhang - oy),
+                        _ => (900.0, AREA.1 + AREA.3 + overhang - oy - cap.1),
+                    };
+                    let snap = snap_overlay_position(WINDOW, Some(cap), AREA, drop.0, drop.1);
+                    assert!(snap.is_some(), "{edge} overhang {overhang} must dock");
+                    let snapped = snap.unwrap();
+                    assert_center_on_edge(WINDOW, cap, snapped, edge);
+                    assert_eq!(
+                        frame.clamp_center(snapped.pos.0, snapped.pos.1),
+                        snapped.pos,
+                        "{edge} overflow landing must survive the show-path re-clamp"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Multi-edge drops pick the strongest edge signal: the smallest signed
+    /// distance — a deep overflow beats a merely close touch on another axis —
+    /// and an exact tie keeps the historical left > right > top > bottom
+    /// priority (the if-chain order in `snap_overlay_position`). With the old
+    /// `abs()` distances the first case wrongly docked **top** (|−100| > 20
+    /// lost the min) instead of the overflowed right edge.
+    #[test]
+    fn deepest_edge_signal_wins_and_ties_keep_historical_priority() {
+        // Overhanging the right edge by 100 px while only 20 px inside the top
+        // edge: the overflow is the stronger signal → docks right.
+        let hit = snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 1928.0, 56.0);
+        let snapped = hit.unwrap();
+        assert_center_on_edge(WINDOW, IDLE_CAPSULE, snapped, "right");
+        // Exact tie (30 px inside the left and top edges): left wins.
+        let hit = snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 42.0, 66.0);
+        let tied = hit.unwrap();
+        assert_center_on_edge(WINDOW, IDLE_CAPSULE, tied, "left");
+    }
+
+    /// The compact docked capsule must re-dock from its own docked spot on
+    /// every edge (0.5.6 A-补 contract, `snap_reports_docked_edge_for_renderer_contract`
+    /// extended to all four edges): a persist run while docked keeps reporting
+    /// the edge instead of flapping to the expanded capsule. The docked spot
+    /// is itself an overflow state (center line on the edge → capsule half
+    /// out), so this also locks the signed-distance fix against a revert.
+    #[test]
+    fn compact_docked_capsule_redocks_on_every_edge() {
+        const COMPACT: (f64, f64) = (36.0, 36.0);
+        let offset_x = (WINDOW.0 - COMPACT.0) / 2.0;
+        let offset_y = (WINDOW.1 - COMPACT.1) / 2.0;
+        for edge in ["left", "right", "top", "bottom"] {
+            // Feed the exact half-hidden landing for this edge back as a drop.
+            let docked = match edge {
+                "left" => (AREA.0 - offset_x - COMPACT.0 / 2.0, 500.0),
+                "right" => (AREA.0 + AREA.2 - offset_x - COMPACT.0 / 2.0, 500.0),
+                "top" => (900.0, AREA.1 - offset_y - COMPACT.1 / 2.0),
+                _ => (900.0, AREA.1 + AREA.3 - offset_y - COMPACT.1 / 2.0),
+            };
+            let snap = snap_overlay_position(WINDOW, Some(COMPACT), AREA, docked.0, docked.1);
+            assert!(snap.is_some(), "docked {edge} capsule must re-dock");
+            let again = snap.unwrap();
+            assert_center_on_edge(WINDOW, COMPACT, again, edge);
+        }
     }
 }
