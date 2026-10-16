@@ -1,10 +1,11 @@
 //! Lifetime dictation statistics, persisted independently from history.
 //!
-//! Home-page "cumulative" stats (total characters / total audio / active days /
+//! Home-page stats (cumulative totals, today, last-N-days window, active days,
 //! peak day) must survive history deletion and the 90-day retention prune, so
 //! they live in their own file (`voice-key-stats.json`) and only ever grow.
-//! Windowed stats (today / last N days / trend charts) are intentionally still
-//! computed from history in the frontend.
+//! Each `daily` entry keeps sessions / characters / audio per local day; the
+//! frontend sums the last N day keys for its "recent" window instead of
+//! re-aggregating (deletable) history. Trend charts still read history directly.
 //!
 //! Character counting MUST stay aligned with the frontend
 //! `src/lib/stats.ts` `countCharacters`: strip every whitespace char, then
@@ -20,7 +21,7 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const STATS_VERSION: u32 = 1;
+const STATS_VERSION: u32 = 2;
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -33,6 +34,58 @@ pub struct StatsTotals {
     pub audio_ms: u64,
 }
 
+/// Per-day aggregate. The legacy v1 stats file stored a bare character count
+/// per day (`"2026-01-01": 123`); [`DayStats`] deserializes BOTH that number and
+/// the current object shape, so an old file is read without failing the whole
+/// parse (which `load_from` would silently swallow into a fresh default,
+/// wiping lifetime totals). Migrated legacy days keep their character count but
+/// have `sessions` / `audio` of 0 — that data was never recorded.
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayStats {
+    /// Recognized transcripts that day.
+    pub sessions: u64,
+    /// Characters recognized that day (whitespace excluded, see `count_characters`).
+    pub characters: u64,
+    /// Audio duration that day in milliseconds (unknown duration counts 0).
+    pub audio_ms: u64,
+}
+
+impl<'de> Deserialize<'de> for DayStats {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        /// Current on-disk shape; fields optional for forward compatibility.
+        #[derive(Default, Deserialize)]
+        #[serde(rename_all = "camelCase", default)]
+        struct Current {
+            sessions: u64,
+            characters: u64,
+            audio_ms: u64,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Compat {
+            /// v1: a bare character count for the day.
+            Legacy(u64),
+            Current(Current),
+        }
+        Ok(match Compat::deserialize(deserializer)? {
+            Compat::Legacy(characters) => DayStats {
+                sessions: 0,
+                characters,
+                audio_ms: 0,
+            },
+            Compat::Current(c) => DayStats {
+                sessions: c.sessions,
+                characters: c.characters,
+                audio_ms: c.audio_ms,
+            },
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StatsStore {
@@ -42,11 +95,11 @@ pub struct StatsStore {
     /// Once true, history deletion / 90-day pruning can never change totals.
     pub backfilled: bool,
     pub totals: StatsTotals,
-    /// Local day key `YYYY-MM-DD` -> characters recognized that day.
-    /// Active days = `daily.len()`; peak day = the max entry. BTreeMap keeps
-    /// JSON output ordered oldest -> newest, so the frontend (and the peak
-    /// tie-break below) sees a deterministic, chronologically sorted map.
-    pub daily: BTreeMap<String, u64>,
+    /// Local day key `YYYY-MM-DD` -> per-day stats. Active days = `daily.len()`;
+    /// peak day = the max `characters` entry. BTreeMap keeps JSON output ordered
+    /// oldest -> newest, so the frontend (and the peak tie-break below) sees a
+    /// deterministic, chronologically sorted map.
+    pub daily: BTreeMap<String, DayStats>,
 }
 
 impl Default for StatsStore {
@@ -113,10 +166,14 @@ impl StatsManager {
     /// Fold one successful transcript into the store.
     fn accumulate(store: &mut StatsStore, text: &str, duration_ms: Option<u64>, timestamp: u64) {
         let chars = count_characters(text);
+        let audio_ms = duration_ms.unwrap_or(0);
         store.totals.sessions += 1;
         store.totals.characters += chars;
-        store.totals.audio_ms += duration_ms.unwrap_or(0);
-        *store.daily.entry(day_key(timestamp)).or_insert(0) += chars;
+        store.totals.audio_ms += audio_ms;
+        let day = store.daily.entry(day_key(timestamp)).or_default();
+        day.sessions += 1;
+        day.characters += chars;
+        day.audio_ms += audio_ms;
     }
 
     /// One-shot seeding from the RAW history items (pass `HistoryManager::
@@ -232,12 +289,39 @@ mod tests {
             .expect("first record");
         StatsManager::record_add_at_in(&path, &[], "ab c", Some(500), ts).expect("second record");
         let store = StatsManager::load_from(&path);
-        assert_eq!(store.totals.sessions, 2);
         let expected_chars = count_characters("你好 world") + count_characters("ab c");
+        assert_eq!(store.totals.sessions, 2);
         assert_eq!(store.totals.characters, expected_chars);
         assert_eq!(store.totals.audio_ms, 2000);
         assert_eq!(store.daily.len(), 1);
-        assert_eq!(store.daily.get(&day_key(ts)), Some(&expected_chars));
+        let day = store.daily.get(&day_key(ts)).expect("day bucket");
+        assert_eq!(day.sessions, 2);
+        assert_eq!(day.characters, expected_chars);
+        assert_eq!(day.audio_ms, 2000);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn legacy_number_daily_file_keeps_totals() {
+        let path = temp_path("legacy-daily");
+        // A v1 file: each daily value is a bare character count, not an object.
+        // Parsing must upgrade in place, never fall back to `default()` (which
+        // would silently reset lifetime totals).
+        let legacy = r#"{
+            "version": 1,
+            "backfilled": true,
+            "totals": { "sessions": 3, "characters": 30, "audioMs": 3000 },
+            "daily": { "2024-01-01": 12, "2024-01-02": 18 }
+        }"#;
+        fs::write(&path, legacy).expect("write legacy stats");
+        let store = StatsManager::load_from(&path);
+        assert_eq!(store.totals.sessions, 3);
+        assert_eq!(store.totals.characters, 30);
+        assert_eq!(store.totals.audio_ms, 3000);
+        let day = store.daily.get("2024-01-01").expect("legacy day kept");
+        assert_eq!(day.characters, 12);
+        assert_eq!(day.sessions, 0);
+        assert_eq!(day.audio_ms, 0);
         let _ = fs::remove_file(&path);
     }
 
@@ -287,6 +371,25 @@ mod tests {
     }
 
     #[test]
+    fn deleting_history_keeps_windowed_stats() {
+        let path = temp_path("windowed");
+        let ts = now_ms();
+        StatsManager::record_add_at_in(&path, &[], "keep me", Some(700), ts).expect("record");
+        let before = StatsManager::load_from(&path);
+        // Clear history -> reload with no raw items. The per-day window fields
+        // (today / last-N-days) must stay byte-identical; only history may
+        // shrink, never the persisted stats the frontend reads.
+        let after = StatsManager::load_or_backfill_from(&path, &[]);
+        assert_eq!(after.daily, before.daily);
+        assert_eq!(after.totals, before.totals);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read stats"),
+            serde_json::to_string_pretty(&before).expect("serialize")
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
     fn retention_prune_does_not_touch_stats() {
         let path = temp_path("prune");
         // 400 days old: far beyond HISTORY_RETENTION_DAYS (90). The raw
@@ -311,5 +414,16 @@ mod tests {
         assert!(json.get("totals").and_then(|t| t.get("audioMs")).is_some());
         assert!(json.get("totals").and_then(|t| t.get("audio_ms")).is_none());
         assert!(json.get("backfilled").is_some());
+        // Per-day values serialize as objects (not bare numbers) with the
+        // camelCase `audioMs` key, which the frontend window sums rely on.
+        let day = json
+            .get("daily")
+            .and_then(|d| d.as_object())
+            .and_then(|d| d.values().next())
+            .expect("daily entry");
+        assert!(day.get("sessions").is_some());
+        assert!(day.get("characters").is_some());
+        assert!(day.get("audioMs").is_some());
+        assert!(day.get("audio_ms").is_none());
     }
 }

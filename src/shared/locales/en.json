@@ -1,12 +1,28 @@
 {
   "app": {
-    "name": "Voice Key",
-    "tagline": "Speak to type",
+    "name": "Zhiruo",
+    "tagline": "Where voice finds words, and Zhiruo finds heart.",
     "version": "Version {{version}}"
+  },
+  "changelog": {
+    "title": "Changelog",
+    "description": "Version-by-version change history",
+    "empty": "No changelog available",
+    "openTitle": "View changelog",
+    "view": "View changelog"
   },
   "theme": {
     "light": "Light",
-    "dark": "Dark"
+    "dark": "Dark",
+    "accent": {
+      "label": "Choose accent color",
+      "gulfBlue": "Gulf Blue",
+      "oliveGreen": "Olive Green",
+      "lavaOrange": "Lava Orange",
+      "sunsetPurple": "Sunset Purple",
+      "elegantGrey": "Elegant Grey",
+      "classic": "Classic"
+    }
   },
   "nav": {
     "home": "Home",
@@ -88,6 +104,12 @@
     "descAsr": "Recognition runs on your computer. Audio is not uploaded.",
     "descRefine": "Shares one LLM connection",
     "descLogs": "For troubleshooting",
+    "appearance": {
+      "title": "Appearance",
+      "description": "Theme mode, accent color, and interface style",
+      "themeMode": "Theme mode",
+      "accentColor": "Accent color"
+    },
     "connectionTitle": "Connection",
     "aboutHint": "Stay up to date for the best experience",
     "health": {
@@ -104,7 +126,7 @@
       "selectedTextTranslation": "Selected text",
       "translationOff": "Off"
     },
-    "about": "About Voice Key",
+    "about": "About Zhiruo",
     "version": "Current Version: v{{version}}",
     "checkUpdate": "Check for Updates",
     "checkingUpdate": "Checking...",
@@ -116,10 +138,10 @@
     "appLanguage": "Interface language",
     "systemLanguage": "System default",
     "autoLaunch": "Launch on startup",
-    "autoLaunchHelp": "Start Voice Key in the background when you log in without opening the window",
+    "autoLaunchHelp": "Start Zhiruo in the background when you log in without opening the window",
     "linuxIntegration": {
       "title": "Linux & Omarchy Integration",
-      "description": "Connect Voice Key to Hyprland for reliable push-to-talk and multilingual text injection on Wayland.",
+      "description": "Connect Zhiruo to Hyprland for reliable push-to-talk and multilingual text injection on Wayland.",
       "ready": "Hyprland integration is ready",
       "x11Ready": "Linux X11 keyboard backend is ready",
       "installedNeedsRepair": "Integration is installed but needs an update",
@@ -134,11 +156,11 @@
       },
       "connected": "Connected",
       "actionRequired": "Action required",
-      "x11Fallback": "Voice Key is using its existing Linux X11 keyboard backend. Hyprland integration is not needed in this session.",
-      "waylandUnsupported": "This Wayland compositor does not expose the Hyprland integration used by Voice Key. Omarchy and Hyprland are supported first; use an X11 session for the legacy backend.",
+      "x11Fallback": "Zhiruo is using its existing Linux X11 keyboard backend. Hyprland integration is not needed in this session.",
+      "waylandUnsupported": "This Wayland compositor does not expose the Hyprland integration used by Zhiruo. Omarchy and Hyprland are supported first; use an X11 session for the legacy backend.",
       "conflicts": "Resolve these existing Hyprland shortcuts before installing: {{conflicts}}",
       "configPath": "Managed user config",
-      "backupHelp": "Voice Key changes only its marked block and keeps a one-time backup next to this file. Removal preserves your other bindings.",
+      "backupHelp": "Zhiruo changes only its marked block and keeps a one-time backup next to this file. Removal preserves your other bindings.",
       "install": "Install integration",
       "repair": "Update integration",
       "remove": "Remove integration",
@@ -203,7 +225,7 @@
       "systemDefault": "System default microphone",
       "refresh": "Detect",
       "detecting": "Detecting...",
-      "help": "Choose which input device Voice Key records from.",
+      "help": "Choose which input device Zhiruo records from.",
       "noDevices": "No microphones detected",
       "deviceFallback": "Microphone {{index}}",
       "unknownDevice": "Selected microphone",
@@ -415,7 +437,7 @@
     "settings": "Settings",
     "overlayToggle": "Show floating capsule",
     "quit": "Quit",
-    "tooltip": "Voice Key"
+    "tooltip": "Zhiruo"
   },
   "titleBar": {
     "label": "Window title bar",
@@ -425,7 +447,7 @@
     "close": "Close"
   },
   "window": {
-    "settingsTitle": "Voice Key Settings"
+    "settingsTitle": "Zhiruo Settings"
   },
   "errors": {
     "ffmpegInitFailed": "FFmpeg initialization failed",

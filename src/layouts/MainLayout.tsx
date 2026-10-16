@@ -1,33 +1,21 @@
-import { ReactNode } from 'react'
+import { ReactNode, useState } from 'react'
 import { Home, Settings, History, Sun, Moon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/lib/useTheme'
 import TitleBar from '@/components/TitleBar'
+import { BrandMark } from '@/components/BrandMark'
+import { ChangelogDialog } from '@/components/ChangelogDialog'
 
 interface MainLayoutProps {
   children: ReactNode
   currentRoute: string
 }
 
-/** 可重新着色的品牌 V 标记。 */
-function VMark({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
-      <path
-        d="M5.4 5 L12 18.4 L18.6 5"
-        stroke="currentColor"
-        strokeWidth={4.4}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
-
 export default function MainLayout({ children, currentRoute }: MainLayoutProps) {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
+  const [changelogOpen, setChangelogOpen] = useState(false)
 
   const navigate = (path: string) => {
     window.location.hash = path
@@ -50,7 +38,7 @@ export default function MainLayout({ children, currentRoute }: MainLayoutProps) 
           {/* 品牌 */}
           <div className="no-drag flex items-center gap-2.5 px-2 pb-4 pt-1">
             <span className="vk-brand-gradient grid h-9 w-9 place-items-center rounded-[11px] text-white shadow-[0_8px_18px_-8px_color-mix(in_oklch,var(--primary)_55%,transparent)]">
-              <VMark className="h-5 w-5" />
+              <BrandMark className="h-5 w-5" />
             </span>
             <span className="flex flex-col leading-tight">
               <span className="font-display text-[15px] font-bold tracking-tight text-sidebar-foreground">
@@ -95,7 +83,16 @@ export default function MainLayout({ children, currentRoute }: MainLayoutProps) 
 
           {/* 版本 + 主题切换 */}
           <div className="mt-3 flex items-center justify-between px-1">
-            <span className="font-mono text-[11px] text-muted-foreground">v{__APP_VERSION__}</span>
+            <button
+              type="button"
+              onClick={() => setChangelogOpen(true)}
+              title={t('changelog.openTitle')}
+              className="no-drag inline-flex items-center gap-1.5 rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15"
+              aria-label={t('changelog.openTitle')}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-primary" />
+              <span className="font-mono">v{__APP_VERSION__}</span>
+            </button>
             <div className="no-drag flex items-center gap-0.5 rounded-full border bg-secondary p-0.5">
               <button
                 onClick={() => setTheme('light')}
@@ -123,6 +120,8 @@ export default function MainLayout({ children, currentRoute }: MainLayoutProps) 
               </button>
             </div>
           </div>
+
+          <ChangelogDialog open={changelogOpen} onOpenChange={setChangelogOpen} />
         </aside>
 
         {/* 右侧内容 */}

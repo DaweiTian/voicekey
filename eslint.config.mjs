@@ -130,7 +130,7 @@ export default tseslint.config(
       // 主进程可能需要 require
       '@typescript-eslint/no-require-imports': 'off',
 
-      // Voice Key ships without a stable Apple signing identity. Any safeStorage access can
+      // Zhiruo ships without a stable Apple signing identity. Any safeStorage access can
       // therefore block managed macOS Keychains, so keep OS credential stores out of runtime code.
       'no-restricted-imports': [
         'error',
@@ -168,7 +168,7 @@ export default tseslint.config(
   // 6b. 本地辅助脚本（CommonJS）
   // ============================================
   {
-    files: ['scripts/**/*.cjs'],
+    files: ['scripts/**/*.cjs', 'src-tauri/icons-src/**/*.cjs'],
     rules: {
       '@typescript-eslint/no-require-imports': 'off',
     },

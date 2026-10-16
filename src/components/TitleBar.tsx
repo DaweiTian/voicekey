@@ -3,6 +3,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Minus, Square, Maximize2, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
+import { BrandMark } from '@/components/BrandMark'
 
 type TauriWindow = ReturnType<typeof getCurrentWindow>
 
@@ -12,21 +13,6 @@ function getCurrentWindowSafe(): TauriWindow | null {
   } catch {
     return null
   }
-}
-
-/** 可重新着色的品牌 V 标记。 */
-function VMark({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
-      <path
-        d="M5.4 5 L12 18.4 L18.6 5"
-        stroke="currentColor"
-        strokeWidth={4.4}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
 }
 
 export default function TitleBar() {
@@ -96,7 +82,7 @@ export default function TitleBar() {
       {/* 品牌区 - 与侧栏 Logo 呼应 */}
       <div className="no-drag flex items-center gap-2 px-3">
         <span className="vk-brand-gradient grid h-5 w-5 place-items-center rounded-[6px] text-white shadow-sm">
-          <VMark className="h-3 w-3" />
+          <BrandMark className="h-3 w-3" />
         </span>
         <span className="font-display text-[13px] font-semibold tracking-tight">
           {t('app.name')}

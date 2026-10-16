@@ -1,9 +1,51 @@
+//! App configuration store (`voice-key-config.json`).
+//!
+//! Thread safety ([`CONFIG_LOCK`]): every read-modify-write of the config file
+//! runs under one process-wide mutex, the same pattern as `stats.rs::STATS_LOCK`.
+//! Concurrent writers exist: `commands::sync_overlay_visibility_flag` runs on
+//! the overlay-rebuild worker thread, on tray-event threads and on the main
+//! thread; `set_overlay_position` runs on renderer IPC threads. Interleaved
+//! `load -> mutate -> save` cycles would silently lose each other's updates.
+//!
+//! Write entry points (enumerated so any new one joins the same lock):
+//! * [`ConfigStore::merge`] - the only functional writer. Callers in
+//!   `commands.rs`: `set_config` (and its hotkey rollback),
+//!   `test_refine_connection`, `set_app_language`,
+//!   `sync_overlay_visibility_flag` (overlay worker / tray / main thread) and
+//!   `set_overlay_position` (both the persist and the reset branch).
+//! Writes reach the file via the private [`ConfigStore::save_unlocked`]
+//! primitive, always while holding the lock.
+//! No other module writes `voice-key-config.json` (`fs::write` in history.rs /
+//! stats.rs / asr.rs targets different files).
+//!
+//! Lock discipline: the mutex is only ever held around file I/O and pure JSON
+//! merging - no session / stats / tray lock is taken while it is held, so no
+//! lock-ordering deadlock is possible (exactly one lock, never nested).
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
+
+/// Process-wide guard for read-modify-write cycles on the config file (see the
+/// module header for the enumerated write entry points). A poisoned mutex is
+/// recovered instead of panicking: the authoritative data is on disk, not in
+/// the guard.
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 pub const STORED_SECRET_PLACEHOLDER: &str = "••••••••••••";
 pub const HISTORY_RETENTION_DAYS: i64 = 90;
+
+/// Persisted HUD capsule position (physical desktop pixels, as captured from
+/// the overlay window's `outerPosition()` after a drag). `None` means "no
+/// custom position": the capsule uses the bottom-center default. Cleared by
+/// `set_overlay_position` with a `null` coordinate.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlayPosition {
+    pub x: f64,
+    pub y: f64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +57,10 @@ pub struct AppPreferences {
     /// a session starts. Defaults to visible.
     #[serde(default = "default_true")]
     pub overlay_visible: bool,
+    /// Last drag-and-drop position of the HUD capsule (physical pixels).
+    /// `None` = bottom-center default. Written by `set_overlay_position`.
+    #[serde(default)]
+    pub overlay_position: Option<OverlayPosition>,
 }
 
 impl Default for AppPreferences {
@@ -23,6 +69,7 @@ impl Default for AppPreferences {
             language: "system".into(),
             auto_launch: false,
             overlay_visible: true,
+            overlay_position: None,
         }
     }
 }
@@ -273,14 +320,27 @@ impl ConfigStore {
         }
     }
 
+    /// Read the config file. Serialized against writers by [`CONFIG_LOCK`] so
+    /// a concurrent `fs::write` can never be observed half-written (a torn
+    /// read would deserialize to `AppConfig::default()` and could, via
+    /// `merge`, wipe stored settings).
     pub fn load(&self) -> AppConfig {
+        let _guard = CONFIG_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        self.load_unlocked()
+    }
+
+    /// [`Self::load`] without locking. Only call while holding [`CONFIG_LOCK`].
+    fn load_unlocked(&self) -> AppConfig {
         match fs::read_to_string(&self.path) {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
             Err(_) => AppConfig::default(),
         }
     }
 
-    pub fn save(&self, config: &AppConfig) -> Result<(), String> {
+    /// The config-file write primitive. Not thread-safe on its own: callers
+    /// must hold [`CONFIG_LOCK`] (see the module header: every write path
+    /// goes through it).
+    fn save_unlocked(&self, config: &AppConfig) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -324,8 +384,16 @@ impl ConfigStore {
     }
 
     /// Merge partial config, preserving stored secrets when placeholder is echoed back.
+    ///
+    /// The whole load -> mutate -> save sequence runs under [`CONFIG_LOCK`]
+    /// (same pattern as `stats.rs::STATS_LOCK`): concurrent callers
+    /// (`sync_overlay_visibility_flag` on the overlay-rebuild worker thread,
+    /// tray / main-thread paths, `set_overlay_position`, `set_config`) can
+    /// never interleave and lose each other's updates. Nothing else is locked
+    /// inside, so holding it cannot deadlock.
     pub fn merge(&self, partial: &serde_json::Value) -> Result<AppConfig, String> {
-        let stored = self.load();
+        let _guard = CONFIG_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let stored = self.load_unlocked();
         let mut merged = stored.clone();
 
         if let Some(app) = partial.get("app") {
@@ -342,6 +410,21 @@ impl ConfigStore {
                 }
                 if let Some(v) = obj.get("overlayVisible").and_then(|v| v.as_bool()) {
                     merged.app.overlay_visible = v;
+                }
+                // `overlayPosition`: explicit `null` clears the persisted HUD
+                // position (capsule falls back to the bottom-center default);
+                // a `{ x, y }` object stores it; anything else is ignored so a
+                // malformed patch can never corrupt the stored position.
+                if let Some(v) = obj.get("overlayPosition") {
+                    if v.is_null() {
+                        merged.app.overlay_position = None;
+                    } else if let Some(pos) = v.as_object().and_then(|o| {
+                        let x = o.get("x").and_then(|n| n.as_f64())?;
+                        let y = o.get("y").and_then(|n| n.as_f64())?;
+                        (x.is_finite() && y.is_finite()).then_some(OverlayPosition { x, y })
+                    }) {
+                        merged.app.overlay_position = Some(pos);
+                    }
                 }
             }
         }
@@ -490,7 +573,7 @@ impl ConfigStore {
             }
         }
 
-        self.save(&merged)?;
+        self.save_unlocked(&merged)?;
         Ok(merged)
     }
 }

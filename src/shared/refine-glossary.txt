@@ -1,4 +1,4 @@
-# Voice Key refine glossary
+# 芷若 (Zhiruo) refine glossary
 System Prompt
 Anthropic
 Claude
@@ -20,4 +20,5 @@ cursor
 Kimi
 DeepSeeK
 MiniMax
-Voice Key
+Zhiruo
+芷若

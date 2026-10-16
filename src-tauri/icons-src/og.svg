@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <!-- 芷若 (Zhiruo) 社交分享图 (og.png) 源稿 -->
+  <defs>
+    <linearGradient id="og-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#456024" />
+      <stop offset="0.55" stop-color="#6F9331" />
+      <stop offset="1" stop-color="#9CBF4A" />
+    </linearGradient>
+    <radialGradient id="og-sheen" cx="0.22" cy="0.16" r="0.9">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18" />
+      <stop offset="0.6" stop-color="#FFFFFF" stop-opacity="0.03" />
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#og-bg)" />
+  <rect width="1200" height="630" fill="url(#og-sheen)" />
+
+  <!-- 品牌标记（同 icon.svg 造型，居左） -->
+  <g transform="translate(-93 19) scale(0.62)">
+    <path d="M296 728 C316 560 448 424 616 408 C596 576 464 712 296 728 Z" fill="#F6FAEE" />
+    <path d="M606 298 A110 110 0 0 1 726 418" fill="none" stroke="#F6FAEE" stroke-width="56" stroke-linecap="round" />
+    <path d="M599 219 A190 190 0 0 1 805 425" fill="none" stroke="#F6FAEE" stroke-width="44" stroke-linecap="round" />
+  </g>
+
+  <!-- 标题与 slogan -->
+  <text x="470" y="292" font-family="Microsoft YaHei, PingFang SC, Noto Sans SC, sans-serif"
+    font-size="92" font-weight="700" fill="#FFFFFF">芷若 Zhiruo</text>
+  <text x="470" y="376" font-family="Microsoft YaHei, PingFang SC, Noto Sans SC, sans-serif"
+    font-size="42" fill="#EAF2D8">言若有声，芷若知心。</text>
+  <text x="470" y="442" font-family="Microsoft YaHei, PingFang SC, Noto Sans SC, sans-serif"
+    font-size="25" fill="#D5E3B6">Free &amp; Open Source · Local-first voice input</text>
+</svg>

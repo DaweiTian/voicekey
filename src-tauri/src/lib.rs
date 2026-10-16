@@ -22,6 +22,15 @@ pub fn run() {
     env_logger::init();
 
     tauri::Builder::default()
+        // Single-instance guard, registered FIRST: a second launch hands its
+        // argv to the running instance and exits before any other plugin or
+        // `setup` work can double-run (no second tray icon / overlay / hotkey
+        // grab / stats-store race). The callback runs in the FIRST instance.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // Show and focus the running instance's main window, rebuilding it
+            // on a worker thread if the delayed destroy reclaimed it.
+            windowing::open_main_window(app);
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
@@ -42,6 +51,15 @@ pub fn run() {
                     api.prevent_close();
                     windowing::hide_main_window_to_tray(window.app_handle());
                 }
+            } else if window.label() == windowing::OVERLAY_WINDOW_LABEL {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    // The HUD capsule must never be destroyed (the renderer
+                    // holds `core:window:allow-close`): convert a close into
+                    // hide + persist, so the tray "Show floating capsule"
+                    // entry can always bring it back.
+                    api.prevent_close();
+                    commands::hide_overlay(window.app_handle());
+                }
             }
         })
         .setup(|app| {
@@ -49,7 +67,7 @@ pub fn run() {
             app.manage(state);
 
             if let Some(main) = app.get_webview_window("main") {
-                let _ = main.set_title("Voice Key");
+                let _ = main.set_title("芷若");
             }
 
             tray::setup_tray(app.handle())?;
@@ -113,10 +131,11 @@ pub fn run() {
             commands::remove_linux_integration,
             commands::set_ignore_mouse_events,
             commands::set_overlay_size,
+            commands::set_overlay_position,
             commands::show_settings_window,
             commands::refine_text,
             commands::translate_text,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Voice Key");
+        .expect("error while running Zhiruo");
 }

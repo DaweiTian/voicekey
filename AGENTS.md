@@ -1,12 +1,19 @@
-# Voice Key Development Guide
+# 芷若 (Zhiruo) Development Guide
 
 ## Overview
 
-Voice Key is a Tauri 2 (Rust) + React + TypeScript desktop app for push-to-talk
+芷若 (Zhiruo, "Voice Key" upstream) is a Tauri 2 (Rust) + React + TypeScript desktop app for push-to-talk
 voice input, transcription, optional text refinement/translation, history, and
 text injection into the focused application. The Electron backend was replaced by
 Tauri so the app uses the system WebView instead of a bundled Chromium; the React
 product UI and the `window.electronAPI` renderer surface were kept intact.
+
+Branding (rebranded from "Voice Key"): display layer uses 芷若 (zh) / Zhiruo
+(en), slogan 言若有声，芷若知心。/ "Where voice finds words, and Zhiruo finds
+heart.", olive-green accent (default) and the leaf+soundwave icon from
+`src-tauri/icons-src/icon.svg`. Internal identifiers deliberately stay `voicekey`
+/ `voice-key` (crate name, `tauri.conf.json` identifier, data file names, updater
+repo) — do not rename those; they gate AppData paths and update sources.
 
 ## Current Structure
 
@@ -46,7 +53,8 @@ voicekey/
     Cargo.toml / Cargo.lock
     tauri.conf.json   App windows, security CSP, bundling, plugin config.
     capabilities/default.json  Renderer permissions.
-    icons/            Bundler icons (referenced by tauri.conf.json).
+    icons/            Bundler icons (referenced by tauri.conf.json); generated.
+    icons-src/        Icon source SVG + render scripts (see its README).
   src/                React renderer (Vite).
     components/      React UI, HUD, recorder bridge, charts, logs, hotkey
                      widgets, custom TitleBar.

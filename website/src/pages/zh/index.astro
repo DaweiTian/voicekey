@@ -1,6 +1,6 @@
 ---
 /**
- * Voice Key 官网首页（中文）
+ * 芷若 (Zhiruo) 官网首页（中文）
  */
 import { Image } from 'astro:assets'
 import BaseLayout from '@layouts/BaseLayout.astro'
@@ -19,9 +19,9 @@ import {
 import LanguageSwitch from '@components/LanguageSwitch.astro'
 import ThemeToggle from '@components/ThemeToggle.astro'
 
-const title = 'Voice Key - 免费开源、可离线使用的语音输入工具'
+const title = '芷若 Zhiruo - 免费开源、可离线使用的语音输入工具'
 const description =
-  'Voice Key 是一款适用于 Windows、macOS 与 Linux 的免费开源语音输入工具。下载本地语音识别模型后，无需联网也能使用；最近 90 天的输入历史保存在本机。'
+  '芷若（Zhiruo）是一款适用于 Windows、macOS 与 Linux 的免费开源语音输入工具。言若有声，芷若知心——下载本地语音识别模型后，无需联网也能使用；最近 90 天的输入历史保存在本机。'
 
 const latestVersion = `v${rootPackage.version}`
 
@@ -30,7 +30,7 @@ const features = [
   {
     icon: Github,
     title: '免费且开源',
-    desc: 'Voice Key 本身免费下载、免费使用。源代码采用 MIT 许可证公开，你可以查看、修改，也可以自己构建。',
+    desc: '芷若本身免费下载、免费使用。源代码采用 MIT 许可证公开，你可以查看、修改，也可以自己构建。',
   },
   {
     icon: Cpu,
@@ -55,7 +55,7 @@ const features = [
   {
     icon: Monitor,
     title: '在常用应用里直接输入',
-    desc: '聊天软件、文档、浏览器或代码编辑器。只要光标停在文本框里，Voice Key 就可以把文字输入进去。',
+    desc: '聊天软件、文档、浏览器或代码编辑器。只要光标停在文本框里，芷若就可以把文字输入进去。',
   },
 ]
 ---
@@ -107,7 +107,7 @@ const features = [
         >
           <Image
             src={logoImage}
-            alt="Voice Key Logo"
+            alt="芷若 Logo"
             width={96}
             height={96}
             class="w-24 h-24 object-cover"
@@ -118,13 +118,13 @@ const features = [
       <h1
         class="text-5xl md:text-7xl font-bold mb-6 text-foreground animate-fade-in tracking-tighter"
       >
-        Voice Key
+        芷若 <span class="text-muted-foreground/80">Zhiruo</span>
       </h1>
 
       <p
         class="text-xl md:text-2xl text-muted-foreground mb-10 max-w-2xl animate-slide-up leading-relaxed"
       >
-        不用订阅的语音输入工具
+        言若有声，芷若知心。
         <br />
         <span class="text-foreground/80 font-medium"
           >按住快捷键说话，松开就能输入；下载本地模型后，断网也能继续用。</span
@@ -175,10 +175,10 @@ const features = [
     <div class="max-w-6xl mx-auto relative z-10">
       <div class="text-center mb-16">
         <h2 class="text-3xl md:text-4xl font-bold text-foreground mb-4 tracking-tight">
-          为什么选择 Voice Key
+          为什么选择芷若
         </h2>
         <p class="max-w-2xl mx-auto text-sm md:text-base text-muted-foreground leading-relaxed">
-          如果你想要一个不收费、下载本地模型后断网也能用、输入记录留在自己电脑上的语音输入工具，Voice Key 就是为这件事做的。
+          如果你想要一个不收费、下载本地模型后断网也能用、输入记录留在自己电脑上的语音输入工具，芷若就是为这件事做的。
         </p>
       </div>
 
@@ -217,7 +217,7 @@ const features = [
         <span>免费开源 · 本地优先</span>
       </div>
       
-      <p>© 2026 Voice Key 开放源代码项目</p>
+      <p>© 2026 芷若开放源代码项目</p>
       
       <div class="flex gap-6">
         <a

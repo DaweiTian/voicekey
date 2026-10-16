@@ -1,9 +1,9 @@
 {
   "name": "voice-key",
   "private": true,
-  "version": "0.5.0",
-  "productName": "Voice Key",
-  "description": "Privacy-first push-to-talk voice input for Windows, macOS, and Linux",
+  "version": "0.5.1",
+  "productName": "芷若",
+  "description": "Zhiruo (芷若) — privacy-first push-to-talk voice input for Windows, macOS, and Linux",
   "author": {
     "name": "BuildWithAIs",
     "email": "buildwithais@users.noreply.github.com"

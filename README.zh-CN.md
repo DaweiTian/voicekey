@@ -1,14 +1,18 @@
 <div align="center">
   <a href="https://github.com/BuildWithAIs/voicekey">
-    <img src="imgs/logo.png" alt="Voice Key 标志" width="96" height="96">
+    <img src="imgs/logo.png" alt="芷若 (Zhiruo) 标志" width="96" height="96">
   </a>
 
-  <h1>Voice Key</h1>
+  <h1>芷若 Zhiruo</h1>
 
   <p><strong>面向 Windows、macOS 和 Linux 的本地优先按键语音输入工具。</strong></p>
 
   <p>
-    按住快捷键说话，松开即可完成输入。Voice Key 在本机完成语音识别，按需使用你自己的
+    <em>言若有声，芷若知心。</em>
+  </p>
+
+  <p>
+    按住快捷键说话，松开即可完成输入。芷若在本机完成语音识别，按需使用你自己的
     LLM 服务润色文本，并把结果写入当前获得焦点的应用。
   </p>
 
@@ -28,12 +32,12 @@
 </div>
 
 > [!NOTE]
-> Voice Key 仍在积极开发中。目前发布的安装包尚未进行商业代码签名，因此安装时可能会看到
+> 芷若仍在积极开发中。目前发布的安装包尚未进行商业代码签名，因此安装时可能会看到
 > Windows SmartScreen 或 macOS Gatekeeper 的安全提示。
 
-## 为什么选择 Voice Key
+## 为什么选择芷若
 
-Voice Key 让语音输入融入现有桌面工作流。它在后台运行，仅在按住录音快捷键时采集声音，
+芷若让语音输入融入现有桌面工作流。它在后台运行，仅在按住录音快捷键时采集声音，
 并把最终文本直接粘贴到光标所在位置。
 
 - **本地优先识别** — 使用按需下载的 ONNX 模型在本机处理音频，无需 ASR API Key。
@@ -71,7 +75,7 @@ Electron 主进程统一管理录音会话、模型文件、快捷键、凭据�
 | **流式模式** | X-ASR-zh-en 480 ms   | 说话时显示中英实时文字，模型原生输出标点与英文大小写 | 586 MB   |
 
 两种模式互斥。模型仅在用户从设置页主动下载时写入 Electron 的用户数据目录；应用会校验
-固定的文件大小和 SHA-256 哈希。下载流式模型前，Voice Key 会读取当前公网连接的两位国家码，
+固定的文件大小和 SHA-256 哈希。下载流式模型前，芷若会读取当前公网连接的两位国家码，
 但不会存储或记录 IP 地址：中国大陆优先使用 ModelScope，美国及其他海外连接优先使用
 Hugging Face，任一首选源失败时仍会自动尝试另一来源。切换模式不会自动删除已经下载的另一套模型。
 
@@ -111,25 +115,25 @@ Windows 和 Linux 的默认录音快捷键是 `Control+Shift+Space`；macOS 的�
 如果 macOS 提示未签名应用“已损坏”，请先把应用移动到 `/Applications`，再运行：
 
 ```bash
-xattr -cr "/Applications/Voice Key.app"
+xattr -cr "/Applications/芷若.app"
 ```
 
-随后前往**系统设置 → 隐私与安全性 → 辅助功能**，为 Voice Key 开启权限。
+随后前往**系统设置 → 隐私与安全性 → 辅助功能**，为芷若开启权限。
 
 ### Linux 与 Omarchy
 
 在常规 x86_64 Linux 发行版中，为下载的 AppImage 添加执行权限后启动：
 
 ```bash
-chmod +x "/path/to/Voice Key-Linux.AppImage"
-"/path/to/Voice Key-Linux.AppImage"
+chmod +x /path/to/芷若*.AppImage
+/path/to/芷若*.AppImage
 ```
 
 部分新版发行版默认不包含 FUSE 2。如果 AppImage 提示缺少 `libfuse.so.2`，请安装系统的
 `fuse2` 或 `libfuse2` 包，也可以使用 AppImage 的提取运行模式：
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 "/path/to/Voice Key-Linux.AppImage"
+APPIMAGE_EXTRACT_AND_RUN=1 /path/to/芷若*.AppImage
 ```
 
 Omarchy 或 Arch Linux 用户可以安装下载的 pacman 包：
@@ -139,7 +143,7 @@ sudo pacman -U "/path/to/voice-key-package.pkg.tar.zst"
 ```
 
 在 Omarchy/Hyprland 中，请打开**设置 → Linux 与 Omarchy 集成**并点击**安装集成**。
-Voice Key 只会管理 `~/.config/hypr/bindings.lua` 中带明确标记的配置块；安装时会检查
+芷若只会管理 `~/.config/hypr/bindings.lua` 中带明确标记的配置块；安装时会检查
 快捷键冲突、保留备份、重载 Hyprland，并在校验失败时自动回滚。
 
 执行文本注入时，集成会通过 `wl-copy --sensitive` 临时提供剪贴板文本，并使用 `wtype`
@@ -221,4 +225,4 @@ build/        安装包图标与打包资源
 
 ## 开源协议
 
-Voice Key 使用 [MIT License](LICENSE) 开源。
+芷若使用 [MIT License](LICENSE) 开源。

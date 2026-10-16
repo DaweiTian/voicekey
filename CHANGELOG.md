@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.1](https://github.com/BuildWithAIs/voicekey/compare/v0.5.0...v0.5.1) (2026-10-16)
+
+### Features
+
+- **app:** 防止多实例运行，重复启动时聚焦已存在的窗口
+- **overlay:** 待机胶囊支持拖拽，带边缘吸附与位置持久化；双击可复位
+- **ui:** 新增版本徽章与更新日志弹窗（侧边栏 / 关于卡片）
+- **ui:** 新增六种小米 SU7 风格主题色（默认橄榄绿）及设置「外观」分区
+- **brand:** 应用更名为芷若 (Zhiruo)，口号「言若有声，芷若知心。」，启用新的兰叶 + 声波图标并更新官网视觉
+- **session:** 新增 Rust 侧 5 分钟会话看门狗，作为渲染层计时器之外的第二道防线
+
+### Bug Fixes
+
+- **stats:** 首页统计与历史删除/清空完全解耦；今日/近 7 天窗口不再随删除收缩，旧统计文件无损升级
+- **overlay:** 胶囊关闭后可由托盘重新打开（标志位与窗口可见性不同步，窗口缺失时从未重建）
+- **ui:** 移除圆角矩形边框，仅显示胶囊主体
+- **mouse:** 滚轮输入不再中断进行中的中键录音（松开时重新检测物理按键状态，容忍硬件抖动）
+- **overlay:** 修复拖拽状态卡死（指针捕获 + 看门狗复位），双击复位不再误报空录音错误，拖拽调整大小后不会回弹到旧位置
+- **config/tray:** 以进程级锁串行化跨线程配置写入，杜绝更新丢失；托盘菜单变更回派主线程处理
+
 ## [0.5.0] - 2026-10-16
 
 本版本一并补记 0.4.0 未写入 changelog 的 Tauri 迁移主线，以及本轮桌面可靠性修复。

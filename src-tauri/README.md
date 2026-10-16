@@ -6,10 +6,14 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
 ## 文件
 
 - `src/main.rs` - 二进制入口，仅转发到 `voice_key_lib::run()`。
-- `src/lib.rs` - Builder 装配：插件注册（含 `tauri-plugin-autostart`）、主窗口
-  CloseRequested → 隐藏到托盘并启动 5 分钟延迟销毁（`windowing`）（唯一真正退出
-  路径是托盘 Quit）、setup 时对现有窗口做 Windows 焦点框硬化首遍，并初始化鼠标
-  中键 PTT（`mouse.rs`）与常驻待机 HUD 胶囊（`commands::show_overlay_idle`）。
+- `src/lib.rs` - Builder 装配：插件注册（**`tauri-plugin-single-instance` 必须注册在
+  链首**：二次启动把 argv 交给首个实例后立即退出，回调里 `windowing::open_main_window`
+  聚焦/重建已有实例主窗口，不会重复建托盘/overlay/热键、也不会竞态统计数据文件；
+  其余含 `tauri-plugin-autostart`）、主窗口 CloseRequested → 隐藏到托盘并启动 5 分钟
+  延迟销毁（`windowing`）（唯一真正退出路径是托盘 Quit）、overlay CloseRequested →
+  `prevent_close` + `commands::hide_overlay`（悬浮胶囊绝不销毁，渲染层持有
+  `core:window:allow-close`）、setup 时对现有窗口做 Windows 焦点框硬化首遍，并初始化
+  鼠标中键 PTT（`mouse.rs`）与常驻待机 HUD 胶囊（`commands::show_overlay_idle`）。
 - `src/windowing.rs` - 窗口生命周期共用逻辑：Windows 焦点框硬化（overlay：
   `WS_EX_NOACTIVATE` + `DWMWA_BORDER_COLOR=NONE` 幂等重施；main：仅去 DWM 焦点框，
   **不加** `WS_EX_NOACTIVATE`，保留应用自绘 CSS 边框）。**回归警示**：
@@ -20,24 +24,50 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `ensure_main_window` 幂等重建（label 仍为 `"main"`，尺寸/位置/decorations 与
   `tauri.conf.json` 的 main 条目一致），`open_main_window` 为所有打开路径（托盘
   x2、settings 快捷键、`show_settings_window` 命令）的安全入口（重建在工作线程执行，
-  避开 Windows 上 wry#583 主线程建窗死锁）。
+  避开 Windows 上 wry#583 主线程建窗死锁）。另有 `ensure_overlay_window`：悬浮胶囊
+  正常只 hide/show，但若某条关闭路径真的销毁了 overlay 窗口，它按 `tauri.conf.json`
+  的 overlay 条目同形幂等重建（同样只在工作线程调用），保证托盘"显示悬浮胶囊"永远
+  能把胶囊找回来。
 - `src/tray.rs` - **唯一**托盘来源（`tauri.conf.json` 不再配置 `app.trayIcon`，
-  否则会出现两个图标）。右键菜单：Open Voice Key / Settings / Launch at login
+  否则会出现两个图标）。右键菜单：Open Zhiruo / Settings / Launch at login
   （可勾选，纯 Rust 侧 enable/disable 并同步勾选态）/ Show floating capsule
   （可勾选，切换 HUD 常驻胶囊显隐并持久化到 `app.overlayVisible`；隐藏后 PTT
-  快捷键与鼠标中键触发不受影响）/ Quit。
+  快捷键与鼠标中键触发不受影响）。**该入口必须永远有效**：切换方向以窗口
+  `is_visible()` 的真实状态为准（不信任持久化 flag，二者可能被关闭/隐藏路径弄失步），
+  显示走 `commands::show_overlay_forced`（无视 flag 强制复开）、隐藏走
+  `commands::hide_overlay`，两者都会把 flag 与勾选态同步到实际达到的状态
+  （`set_overlay_menu_checked` 注册的 checkmark setter 供其他隐藏路径复用）/ Quit。
 - `src/commands.rs` - 前端 invoke 命令。HUD overlay 为常驻待机胶囊（启动时显示，
   idle → recording → processing → success/error → 回 idle，会话结束不再隐藏），
-  定位为「光标所在屏幕工作区底部居中、任务栏上方 ~48px」（
-  `position_overlay_bottom_center`），先定位后显示，并在 show 前后幂等重施
-  overlay 硬化（常驻 show 路径同样走 `overlay_show`，硬化必生效）；托盘隐藏后
-  `overlay_show` 直接跳过。`set_overlay_size` 命令（渲染层契约：invoke 名
-  `set_overlay_size`、参数 `{ width, height }`，逻辑像素）把 overlay `set_size`
-  为夹取后的尺寸（40..=400 × 32..=120）并经 `position_overlay_bottom_center` 保持
-  底部居中。`start_session_internal` 是 PTT / 中键 / HUD pointerdown 三路的统一
+  定位优先使用持久化拖拽位置 `app.overlayPosition`（越界时按所在显示器工作区重钳制，
+  不回弹），否则「光标所在屏幕工作区底部居中、任务栏上方 ~48px」（
+  `position_overlay_bottom_center` / `position_overlay`），先定位后显示，并在 show
+  前后幂等重施 overlay 硬化（常驻 show 路径同样走 `overlay_show`，硬化必生效）；
+  `overlay_show` 尊重 `app.overlayVisible`（托盘隐藏后自动 show 跳过，胶囊保持隐藏），
+  但托盘入口走 `show_overlay_forced` 强制复开，且 overlay 窗口缺失时经
+  `windowing::ensure_overlay_window` 在工作线程重建。每次 show/hide 都把
+  `app.overlayVisible` 与托盘勾选态同步到真实状态（`hide_overlay` 同步隐藏语义；
+  同步函数可从 overlay 重建工作线程调用：配置写盘走 `config.rs` 的 `CONFIG_LOCK`，
+  托盘勾选态变更经 `run_on_main_thread` 派回主线程，失败记 `log::warn!`）。
+  `set_overlay_size` 命令（渲染层契约：invoke 名 `set_overlay_size`、参数
+  `{ width, height }`，逻辑像素）把 overlay `set_size` 为夹取后的尺寸
+  （40..=400 × 32..=120）并经 `position_overlay` 保持持久化位置/底部居中。
+  `set_overlay_position` 命令（渲染层契约：invoke 名 `set_overlay_position`、参数
+  `x: f64 | null, y: f64 | null`，**物理像素**、直接来自窗口 `outerPosition()`）：
+  拖拽落点吸附到所属显示器工作区最近的边（左/右/上/下，间隙 10 物理像素）、钳制进
+  工作区后移动窗口并持久化到 `app.overlayPosition: {x, y}`（多显示器/DPI 安全，与
+  `position_overlay_bottom_center` 同一套物理像素换算）；传 `null`（任一坐标）则清除
+  持久化并回到底部居中默认位。`start_session_internal` 是 PTT / 中键 / HUD pointerdown 三路的统一
   入口：仅 Idle / Completed / Error 可启动，Recording / Processing 一律拒绝并安静
   失败（防止转写/润色的 Processing 窗口内按 PTT 顶掉在途会话造成孤儿录音）；
-  启动 / 停止 / 取消 / 出错路径都会清掉 mouse.rs 的中键会话 token。
+  启动 / 停止 / 取消 / 出错路径都会清掉 mouse.rs 的中键会话 token。启动时同时
+  调度 Rust 侧 5 分钟会话看门狗（`spawn_session_time_watchdog`，与渲染层
+  `SESSION_MAX_DURATION_SECONDS` 的 `setTimeout` 同预算、双兜底）：到期仅当会话
+  id 未变、仍 `Recording` 且 `audio::session_time_limit_reached`（按 `started_at`
+  复核）判定过期时，走与渲染层定时器**相同**的 stop 管线（转写 + 注入，不走
+  cancel 丢弃音频；Rust 侧即可释放会话状态并使鼠标 token 失效，麦克风关闭仍由
+  渲染层收 `stop-recording` 事件完成）；与正常 stop 竞态时按会话 id 抢锁，抢不到
+  静默让路，绝不发"无录音"假 toast。
   `overlay_idle_later` 为 `pub(crate)`，`translate.rs` 直接复用（1.2s 回 idle）。
   `show_settings_window` 为 async 命令并经
   `windowing::open_main_window` 打开/重建主窗口。`set_config` 在 rebind 失败时回滚
@@ -45,12 +75,16 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   dirty），并即时应用 `mouse.middleClickPtt`（`mouse.rs` 钩子安装/卸载）；
   `set_hotkey_capture_active` 维护快捷键录制态守卫。
 - `src/stats.rs` - 独立累计统计存储（`voice-key-stats.json`）：识别字符总数 /
-  录音总时长 / 按日字符数只增不减，不受历史删除与 90 天裁剪影响；字符口径与
-  `src/lib/stats.ts::countCharacters` 对齐（剔除空白后计数），首次使用时从
-  **未裁剪**的历史原始条目幂等回填（`backfilled` 一次性标记）。读-改-写全程持
-  进程级 `STATS_LOCK`（`get` 的首跑回填与 `record_add` 的累加并发时不会丢更新）；
-  `StatsTotals` 带 `#[serde(default)]`，`totals` 缺字段不再导致整文件反序列化失败
-  把终身统计静默重置。`stop_session`
+  录音总时长 / 按日统计（`sessions` / `characters` / `audioMs`）只增不减，不受
+  历史删除与 90 天裁剪影响——Home 的今日与近 N 日窗口也改读它（前端按日历日
+  求和 `daily`），不再随历史缩水。字符口径与 `src/lib/stats.ts::countCharacters`
+  对齐（剔除空白后计数），首次使用时从 **未裁剪**的历史原始条目幂等回填
+  （`backfilled` 一次性标记）。**兼容老文件**：v1 的 `daily` 值是裸字符数，
+  `DayStats` 自定义反序列化同时接受裸数字与当前对象形状，老文件升级时保留字符数
+  （`sessions` / `audioMs` 补 0，此前未记录），绝不因形状不匹配把整文件读成默认
+  值而清空终身统计。读-改-写全程持进程级 `STATS_LOCK`（`get` 的首跑回填与
+  `record_add` 的累加并发时不会丢更新）；`StatsTotals` 带 `#[serde(default)]`，
+  `totals` 缺字段不再导致整文件反序列化失败把终身统计静默重置。`stop_session`
   里在 `HistoryManager::add` 之前累加（避免首跑回填重复计数），`get_stats`
   命令返回该结构。
 - `src/hotkey.rs` - 全局快捷键解析/绑定：bare token `AltRight/ControlRight/ShiftRight`
@@ -65,7 +99,17 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `SetWindowsHookExW(WH_MOUSE_LL)` 钩子；`WM_MBUTTONDOWN` 启动会话、
   `WM_MBUTTONUP` 停止，观察不吞键（始终 `CallNextHookEx`）。钩子回调只做**本地
   Win32 调用**（`WindowFromPoint`/`GetAncestor` 命中检测）+ 非阻塞入队——LL 钩子
-  要求快速返回（~300ms 超时会被系统静默移除）；一切 Tauri 调用（焦点守卫、
+  要求快速返回（~300ms 超时会被系统静默移除）；消息→动作判定为纯函数
+  `classify` 且是**严格 `==` 白名单**（仅 519/520），滚轮（`WM_MOUSEWHEEL`=522 /
+  `WM_MOUSEHWHEEL`=526）与其余鼠标消息一律不产生动作，因此按住中键期间滚动滚轮
+  不会打断会话、也不影响 down/up 配对（附回归单测；**勿把该判定改成范围/阈值**，
+  522/526 正落在 `WM_MBUTTONUP`(520) 与 `WM_MOUSELAST`(526) 之间，范围判定会重新
+  引入“滚动打断录音”的 bug）；Up 事件在 worker 侧还先用 `GetAsyncKeyState(VK_MBUTTON)`
+  高位 bit（0x8000=当前按下）复核物理键态——滚轮震动使开关弹跳产生的**真实
+  WM_MBUTTONUP** 判为弹跳忽略（纯函数 `should_treat_as_bounce` + 回归单测；**勿把
+  复核挪进钩子回调**，队列延迟正是弹跳后复核生效的前提、钩子须保持低延迟），高位=0
+  的真实松开才走停止；Disable 停止决策不复核（保持原语义），误判悬挂由 5 分钟上限
+  与 tray Disable 兜底；一切 Tauri 调用（焦点守卫、
   overlay 判定、启动会话）由**单个串行 worker** 按事件顺序处理，Start 记录所启动
   会话的 id 作 token，Stop 仅当 `session.id == token && status == Recording` 才停
   并清 token，其余启动/停止/取消/出错路径也清 token（`clear_owned_session`），
@@ -90,14 +134,27 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   spawn 到 async runtime 执行，不阻塞快捷键回调；反馈后 1.2s 回 idle 复用
   `commands::overlay_idle_later`；Hyprland 会话剪贴板
   走 `wl-paste`/`wl-copy`（`inject.rs`），其余平台走 `arboard`。
+- `src/config.rs` - 配置存储（`voice-key-config.json`）。**配置写入线程安全**：
+  所有写入口（`merge`：`set_config` 及其快捷键回滚、`test_refine_connection`、
+  `set_app_language`、overlay 显隐 flag / 拖拽位置持久化）的
+  load → mutate → save 全程持进程级 `CONFIG_LOCK`（与 `stats.rs` 的 `STATS_LOCK`
+  同款），读也持锁防半截文件；overlay 重建工作线程、托盘/主线程、IPC 线程并发
+  写不丢更新。锁内只做文件 I/O 与纯 JSON 合并、不嵌套其他锁（无锁序死锁风险）。
 - `src/asr.rs` / `src/audio.rs` / `src/inject.rs` / `src/llm.rs` /
-  `src/history.rs` / `src/config.rs` / `src/platform.rs` / `src/state.rs` /
-  `src/updater.rs` - 各子系统实现（详见各自文件头注释）。
+  `src/history.rs` / `src/platform.rs` / `src/state.rs` /
+  `src/updater.rs` - 各子系统实现（详见各自文件头注释）。`audio.rs` 另含
+  5 分钟会话上限常量 `SESSION_MAX_DURATION_SECONDS`（与渲染层常量同值）与
+  超时判定纯函数 `session_time_limit_reached`（看门狗与单测共用）。
 - `capabilities/default.json` - renderer 权限；托盘/自启动等主进程逻辑不需要
   capability。
+- `icons-src/` - 图标源稿与生成脚本（`icon.svg` 主稿、`tauri icon` 输入位图、官网
+  `og.svg` 分享图）。`icons/` 为生成产物，改图标走 `icons-src/README.md` 的流程。
+- `icons/` - 打包图标全套（含 `icon.icns`），由 `npm run tauri -- icon` 从
+  `icons-src/icon-1024.png` 生成；托盘图标取自 `app.default_window_icon()` 随之同步。
 
 ## 验证
 
 ```bash
 cd src-tauri && cargo check
+cd src-tauri && cargo test
 ```

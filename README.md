@@ -1,14 +1,18 @@
 <div align="center">
   <a href="https://github.com/BuildWithAIs/voicekey">
-    <img src="imgs/logo.png" alt="Voice Key logo" width="96" height="96">
+    <img src="imgs/logo.png" alt="Zhiruo (芷若) logo" width="96" height="96">
   </a>
 
-  <h1>Voice Key</h1>
+  <h1>Zhiruo 芷若</h1>
 
   <p><strong>Privacy-first push-to-talk voice input for Windows, macOS, and Linux.</strong></p>
 
   <p>
-    Hold a hotkey, speak, and release. Voice Key transcribes on your device, optionally cleans up
+    <em>Where voice finds words, and Zhiruo finds heart.</em>
+  </p>
+
+  <p>
+    Hold a hotkey, speak, and release. Zhiruo transcribes on your device, optionally cleans up
     the text with your own LLM provider, and inserts the result into the focused application.
   </p>
 
@@ -28,12 +32,12 @@
 </div>
 
 > [!NOTE]
-> Voice Key is under active development. Current release builds are not code-signed, so Windows
+> Zhiruo is under active development. Current release builds are not code-signed, so Windows
 > SmartScreen or macOS Gatekeeper may show a warning during installation.
 
-## Why Voice Key
+## Why Zhiruo
 
-Voice Key turns speech into text without changing the way you work. It stays in the background,
+Zhiruo turns speech into text without changing the way you work. It stays in the background,
 starts recording only while you hold the push-to-talk key, and pastes the final text wherever your
 cursor is active.
 
@@ -78,7 +82,7 @@ block the application UI.
 
 The modes are mutually exclusive. Model files are downloaded only when requested from Settings,
 stored under Electron's per-user application data directory, and verified against pinned file sizes
-and SHA-256 hashes. Before a Streaming model download, Voice Key reads the two-letter country code
+and SHA-256 hashes. Before a Streaming model download, Zhiruo reads the two-letter country code
 for the current public connection without storing or logging its IP address. Mainland China prefers
 ModelScope, while the United States and other overseas connections prefer Hugging Face; either
 source remains available as a fallback.
@@ -120,18 +124,18 @@ The application needs:
 If macOS reports that the unsigned application is damaged, move it to `/Applications` and run:
 
 ```bash
-xattr -cr "/Applications/Voice Key.app"
+xattr -cr "/Applications/芷若.app"
 ```
 
-Then enable Voice Key under **System Settings → Privacy & Security → Accessibility**.
+Then enable Zhiruo under **System Settings → Privacy & Security → Accessibility**.
 
 ### Linux and Omarchy
 
 For a general x86_64 Linux distribution, make the downloaded AppImage executable and launch it:
 
 ```bash
-chmod +x "/path/to/Voice Key-Linux.AppImage"
-"/path/to/Voice Key-Linux.AppImage"
+chmod +x /path/to/芷若*.AppImage
+/path/to/芷若*.AppImage
 ```
 
 Some recent distributions do not include FUSE 2 by default. If the AppImage reports a missing
@@ -139,7 +143,7 @@ Some recent distributions do not include FUSE 2 by default. If the AppImage repo
 extract-and-run mode:
 
 ```bash
-APPIMAGE_EXTRACT_AND_RUN=1 "/path/to/Voice Key-Linux.AppImage"
+APPIMAGE_EXTRACT_AND_RUN=1 /path/to/芷若*.AppImage
 ```
 
 For Omarchy or Arch Linux, install the downloaded package:
@@ -149,7 +153,7 @@ sudo pacman -U "/path/to/voice-key-package.pkg.tar.zst"
 ```
 
 On Omarchy/Hyprland, open **Settings → Linux & Omarchy Integration** and select
-**Install integration**. Voice Key manages only a marked block in
+**Install integration**. Zhiruo manages only a marked block in
 `~/.config/hypr/bindings.lua`, checks for shortcut conflicts, keeps a backup, reloads Hyprland,
 and rolls back the change if validation fails.
 
@@ -240,4 +244,4 @@ Please do not include API keys, transcript contents, or raw recordings in issues
 
 ## License
 
-Voice Key is available under the [MIT License](LICENSE).
+Zhiruo is available under the [MIT License](LICENSE).

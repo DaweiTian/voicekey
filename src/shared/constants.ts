@@ -192,7 +192,8 @@ export const REFINE_GLOSSARY_TERMS = [
   'Kimi',
   'DeepSeeK',
   'MiniMax',
-  'Voice Key',
+  'Zhiruo',
+  '芷若',
 ] as const
 
 export const REFINE_GLOSSARY_REMOTE = {
@@ -249,7 +250,7 @@ export const LLM_PROVIDERS = {
   TOKENDANCE_APP_URL: 'https://voicekey.buildwithais.com/',
   TOKENDANCE_AUTH_URL: 'https://tokendance.space/auth',
   TOKENDANCE_KEY_EXCHANGE_URL: 'https://tokendance.space/portal/api/v1/auth/keys',
-  TOKENDANCE_KEY_NAME: 'Voice Key',
+  TOKENDANCE_KEY_NAME: 'Zhiruo',
   // Curated chat models from the live TokenDance catalog (https://tokendance.space/gateway/v1/models).
   TOKENDANCE_MODELS: [{ id: 'deepseek-v4.1-flash', label: 'DeepSeek · V4.1 Flash' }],
   DEFAULT_TOKENDANCE_MODEL: 'deepseek-v4.1-flash',

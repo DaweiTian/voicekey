@@ -1,0 +1,52 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-label="Zhiruo app icon"
+>
+  <!--
+    芷若 (Zhiruo) 主图标源稿：兰草叶片与声波融合，橄榄绿渐变。
+    生成方式见同目录 README.md（icon.svg -> icon-1024.png -> npx tauri icon）。
+    UI 内的单色描边版本见 src/components/BrandMark.tsx（保持造型一致）。
+  -->
+  <defs>
+    <linearGradient id="zhiruo-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4E6B26" />
+      <stop offset="0.55" stop-color="#6F9331" />
+      <stop offset="1" stop-color="#93B447" />
+    </linearGradient>
+    <radialGradient id="zhiruo-sheen" cx="0.28" cy="0.2" r="0.9">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.2" />
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0.04" />
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <!-- 橄榄绿圆角底 + 轻微光泽 -->
+  <rect width="1024" height="1024" rx="232" fill="url(#zhiruo-bg)" />
+  <rect width="1024" height="1024" rx="232" fill="url(#zhiruo-sheen)" />
+
+  <!-- 叶片 + 声波（整体略微居中） -->
+  <g transform="translate(-44 44)">
+    <path
+      d="M296 728 C316 560 448 424 616 408 C596 576 464 712 296 728 Z"
+      fill="#F6FAEE"
+    />
+    <path
+      d="M606 298 A110 110 0 0 1 726 418"
+      fill="none"
+      stroke="#F6FAEE"
+      stroke-width="56"
+      stroke-linecap="round"
+    />
+    <path
+      d="M599 219 A190 190 0 0 1 805 425"
+      fill="none"
+      stroke="#F6FAEE"
+      stroke-width="44"
+      stroke-linecap="round"
+    />
+  </g>
+</svg>

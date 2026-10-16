@@ -21,6 +21,9 @@ import {
   Monitor,
   KeyRound,
   MousePointer,
+  Palette,
+  Sun,
+  Moon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -69,7 +72,10 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
+import { useTheme } from '@/lib/useTheme'
 import { validateHotkey } from '@/lib/hotkey-utils'
+import { ChangelogDialog } from '@/components/ChangelogDialog'
+import { AccentSelector } from '@/components/AccentSelector'
 import {
   applyPersistedHotkeyState,
   applyPersistedSecretState,
@@ -459,6 +465,7 @@ function Segmented({
 
 export default function SettingsPage() {
   const { t } = useTranslation()
+  const { theme, setTheme, accent, setAccent } = useTheme()
   const [config, setConfig] = useState<AppConfig>({
     app: {
       language: 'system',
@@ -486,6 +493,7 @@ export default function SettingsPage() {
   const [visibleSecret, setVisibleSecret] = useState<{ id: string; value?: string } | null>(null)
   const [revealingSecretId, setRevealingSecretId] = useState<string | null>(null)
   const [logDialogOpen, setLogDialogOpen] = useState(false)
+  const [changelogOpen, setChangelogOpen] = useState(false)
   const [testingRefine, setTestingRefine] = useState(false)
   const [refineTestStatus, setRefineTestStatus] = useState<TestStatus>(null)
   const [connectingTokenDance, setConnectingTokenDance] = useState(false)
@@ -2026,6 +2034,51 @@ export default function SettingsPage() {
             </div>
           </SectionCard>
 
+          {/* 外观 */}
+          <SectionCard
+            icon={<Palette className="h-[18px] w-[18px]" />}
+            title={t('settings.appearance.title')}
+            desc={t('settings.appearance.description')}
+          >
+            <div className="space-y-5">
+              <div className="space-y-2">
+                <Label>{t('settings.appearance.themeMode')}</Label>
+                <div className="no-drag inline-flex items-center gap-0.5 rounded-full border bg-secondary p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setTheme('light')}
+                    title={t('theme.light')}
+                    className={cn(
+                      'grid h-[26px] w-[30px] cursor-pointer place-items-center rounded-full transition-colors',
+                      theme === 'light'
+                        ? 'bg-card text-primary shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    <Sun className="h-[14px] w-[14px]" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTheme('dark')}
+                    title={t('theme.dark')}
+                    className={cn(
+                      'grid h-[26px] w-[30px] cursor-pointer place-items-center rounded-full transition-colors',
+                      theme === 'dark'
+                        ? 'bg-card text-primary shadow-sm'
+                        : 'text-muted-foreground hover:text-foreground',
+                    )}
+                  >
+                    <Moon className="h-[14px] w-[14px]" />
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>{t('settings.appearance.accentColor')}</Label>
+                <AccentSelector value={accent} onChange={setAccent} />
+              </div>
+            </div>
+          </SectionCard>
+
           {/* 语音识别 */}
           <SectionCard
             icon={<Mic className="h-[18px] w-[18px]" />}
@@ -2844,6 +2897,7 @@ export default function SettingsPage() {
           </SectionCard>
 
           <LogViewerDialog open={logDialogOpen} onOpenChange={setLogDialogOpen} />
+          <ChangelogDialog open={changelogOpen} onOpenChange={setChangelogOpen} />
         </div>
 
         {/* 右侧栏 */}
@@ -2948,6 +3002,15 @@ export default function SettingsPage() {
                   {checkingUpdate ? t('settings.checkingUpdate') : t('settings.checkUpdate')}
                 </Button>
               )}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setChangelogOpen(true)}
+                className="no-drag mt-2 w-full cursor-pointer text-xs text-muted-foreground hover:text-foreground"
+              >
+                <ScrollText className="mr-1.5 h-3.5 w-3.5" />
+                {t('changelog.view')}
+              </Button>
             </div>
           </div>
         </aside>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { countCharacters } from './stats'
+import { computeStats, countCharacters, type HistoryItem, type StoredDictationStats } from './stats'
 
 /**
  * 本套用例是 Rust 单测 `count_characters_matches_frontend_whitespace_rule`
@@ -34,5 +34,72 @@ describe('countCharacters (mirrors Rust count_characters_matches_frontend_whites
     expect(countCharacters('\u200b')).toBe(1)
     // 混合：CJK + emoji + 制表符 + 换行 = 你 好 👋 🏽 世 界 = 6 个码点
     expect(countCharacters('你好\t👋🏽\n世界')).toBe(6)
+  })
+})
+
+/**
+ * 问题④回归锁定：删除/清空历史后，Home 页所有统计**不得减少**。
+ * 修复前「今日次数/今日时长/今日字数/近 7 日」由 historyItems 实时聚合，
+ * 删历史即缩水；修复后 stored 存在时全部取自持久化统计（`daily`）。
+ */
+describe('computeStats (persisted window fields survive history deletion)', () => {
+  const now = new Date()
+  const buildKey = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(
+      2,
+      '0',
+    )}`
+  const todayKey = buildKey(now)
+  const yesterdayKey = buildKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
+
+  const stored: StoredDictationStats = {
+    version: 2,
+    backfilled: true,
+    totals: { sessions: 10, characters: 1000, audioMs: 60000 },
+    daily: {
+      [todayKey]: { sessions: 4, characters: 200, audioMs: 12000 },
+      [yesterdayKey]: { sessions: 3, characters: 150, audioMs: 9000 },
+    },
+  }
+
+  const historyItem = (
+    id: string,
+    text: string,
+    duration: number,
+    timestamp: number,
+  ): HistoryItem => ({
+    id,
+    text,
+    timestamp,
+    duration,
+  })
+
+  const todaysHistory = [historyItem('1', 'hello', 3000, now.getTime())]
+
+  it('reads today / recent window from stored, unaffected by emptying history', () => {
+    const withHistory = computeStats(todaysHistory, stored)
+    const withoutHistory = computeStats([], stored)
+    // 唯一权威来源是 stored：删掉全部历史后每个字段都必须逐字相等。
+    expect(withoutHistory).toEqual(withHistory)
+    expect(withoutHistory.todaySessions).toBe(4)
+    expect(withoutHistory.todayDuration).toBe(12000)
+    expect(withoutHistory.todayCharacters).toBe(200)
+    // 近 7 日 = 今天 + 昨天（日历日窗）
+    expect(withoutHistory.recentCharacters).toBe(350)
+    expect(withoutHistory.recentAudioMs).toBe(21000)
+    expect(withoutHistory.totalCharacters).toBe(1000)
+    expect(withoutHistory.activeDays).toBe(2)
+    expect(withoutHistory.peakDayCharacters).toBe(200)
+    expect(withoutHistory.peakDayKey).toBe(todayKey)
+  })
+
+  it('degrades to pure history aggregation when stored is missing', () => {
+    const stats = computeStats(todaysHistory)
+    expect(stats.totalCharacters).toBe(5)
+    expect(stats.todaySessions).toBe(1)
+    expect(stats.todayCharacters).toBe(5)
+    expect(stats.todayDuration).toBe(3000)
+    expect(stats.recentCharacters).toBe(5)
+    expect(stats.activeDays).toBe(1)
   })
 })

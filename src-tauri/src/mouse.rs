@@ -11,6 +11,31 @@
 //!   on through `CallNextHookEx`, so middle-click paste in terminals and other
 //!   middle-button behaviors keep working (they may fire *together* with the
 //!   recording trigger — the settings copy warns about this).
+//! * **Wheel is inert.** The callback acts on `WM_MBUTTONDOWN` /
+//!   `WM_MBUTTONUP` and nothing else, so `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL` (and
+//!   every other mouse message) can never start, stop or otherwise disturb a
+//!   held session — scrolling mid-press leaves the down/up pair intact. The
+//!   message→action decision is the pure `win::classify` whitelist, locked by
+//!   regression tests; see its comment for the `WM_MOUSELAST`/wheel range trap
+//!   it guards.
+//! * **Bounce-tolerant release.** Scrolling the wheel vibrates the middle
+//!   switch, and a mechanical switch can bounce *open* for a moment: Windows
+//!   then delivers a real `WM_MBUTTONUP` (immediately followed by another
+//!   `WM_MBUTTONDOWN`) although the user still holds the button. Before a
+//!   release stops anything the worker re-checks the physical key state
+//!   (`GetAsyncKeyState(VK_MBUTTON)`, high bit 0x8000 = "currently held"):
+//!   still held → the release is ignored as a bounce and both the session and
+//!   the ownership token are kept, so the genuine release still stops later;
+//!   actually released → the stop proceeds exactly as before. The re-check
+//!   must stay on the worker, never in the hook callback: the queue delay is
+//!   exactly what lets the switch already be re-pressed when the spurious Up
+//!   is handled, and the hook keeps its latency budget. The `Disable` stop
+//!   decision is never re-checked (it must always stop); worst case (a
+//!   genuine release misread as a bounce leaves a session running) the
+//!   5-minute session cap — doubly backed by the renderer's `setTimeout` and
+//!   the Rust watchdog (`commands::spawn_session_time_watchdog`) — and the
+//!   tray Disable path still end it. Decision logic is the pure
+//!   `win::should_treat_as_bounce`, locked by tests.
 //! * **Hook latency budget.** `WH_MOUSE_LL` callbacks must return quickly (the
 //!   system silently removes hooks that block, ~300 ms), so the hook procedure
 //!   only performs *local* Win32 calls (the `WindowFromPoint`/`GetAncestor`
@@ -43,7 +68,8 @@
 //!   thread (single owner): `set_middle_click_ptt` flips an atomic and the
 //!   thread installs/removes the hook itself, so enable/disable can never race
 //!   `SetWindowsHookExW`/`UnhookWindowsHookEx`. Disabling mid-press queues the
-//!   same stop decision as a button release so the recording cannot orphan.
+//!   same stop decision as a button release (minus the bounce re-check) so the
+//!   recording cannot orphan.
 //!
 //! Non-Windows builds compile to no-op stubs; no extra crate is required
 //! (`windows-sys` with `Win32_UI_WindowsAndMessaging` already ships).
@@ -69,10 +95,11 @@ mod win {
     use tauri::{AppHandle, Manager};
     use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
     use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MBUTTON};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetAncestor, PeekMessageW, SetWindowsHookExW,
-        TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK, MSLLHOOKSTRUCT,
-        MSG, PM_REMOVE, WH_MOUSE_LL, WM_MBUTTONDOWN, WM_MBUTTONUP,
+        TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK, MSG,
+        MSLLHOOKSTRUCT, PM_REMOVE, WH_MOUSE_LL, WM_MBUTTONDOWN, WM_MBUTTONUP,
     };
 
     /// Process-wide app handle shared with the hook procedure (a plain
@@ -107,8 +134,20 @@ mod win {
         Down { root_hwnd: isize },
         /// `WM_MBUTTONUP`.
         Up,
-        /// The setting was turned off (possibly mid-press): same decision as a
-        /// release, so an owned recording cannot be orphaned.
+        /// The setting was turned off (possibly mid-press): same stop decision
+        /// as a release (but never bounce-re-checked), so an owned recording
+        /// cannot be orphaned.
+        Disable,
+    }
+
+    /// Whether the stop decision came from a real button release or from the
+    /// setting turning off: only a real release is bounce-re-checked (see
+    /// [`handle_middle_up`]).
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    enum StopCause {
+        /// `WM_MBUTTONUP`: re-check the physical key state first.
+        Release,
+        /// Setting turned off mid-press: stop unconditionally.
         Disable,
     }
 
@@ -179,7 +218,8 @@ mod win {
         while let Some(event) = rx.recv().await {
             match event {
                 MiddleEvent::Down { root_hwnd } => handle_middle_down(root_hwnd),
-                MiddleEvent::Up | MiddleEvent::Disable => handle_middle_up(),
+                MiddleEvent::Up => handle_middle_up(StopCause::Release),
+                MiddleEvent::Disable => handle_middle_up(StopCause::Disable),
             }
         }
     }
@@ -221,11 +261,20 @@ mod win {
                             .ok()
                             .filter(|id| !id.is_empty())
                     });
-                if id.is_some() {
-                    set_owned_session(id);
-                } else {
-                    clear_owned_session();
-                    log::warn!("mouse: started a session but could not read its id; release will be a no-op");
+                match id {
+                    Some(id) => {
+                        // Boundary instrumentation: a hardware switch bounce
+                        // (spurious release while scrolling) shows up as this
+                        // line, then "bounce-tolerant release ignored" and a
+                        // "start rejected" line for the re-press; a genuine
+                        // release shows up as the release/stop line instead.
+                        log::debug!("mouse: middle-button press started session {id}");
+                        set_owned_session(Some(id));
+                    }
+                    None => {
+                        clear_owned_session();
+                        log::warn!("mouse: started a session but could not read its id; release will be a no-op");
+                    }
                 }
             }
             Err(e) => log::debug!("mouse: start rejected: {e}"),
@@ -234,10 +283,36 @@ mod win {
 
     /// Worker-side `WM_MBUTTONUP` / disable: stop only the session this hook
     /// started and that is still recording; anything else is a no-op.
-    fn handle_middle_up() {
+    ///
+    /// A real release first re-checks the physical key state (bounce
+    /// tolerance); [`StopCause::Disable`] keeps its original semantics and
+    /// stops unconditionally. On a bounce this returns *before* taking the
+    /// ownership token, so the genuine release can still stop the session.
+    fn handle_middle_up(cause: StopCause) {
+        if cause == StopCause::Release {
+            // Hardware-switch bounce (e.g. the vibration of scrolling the
+            // wheel while the button is held) delivers a real WM_MBUTTONUP
+            // while the finger still holds the switch. The queue delay is
+            // exactly what makes this re-check reliable: by the time the
+            // worker handles the spurious Up, the following press has usually
+            // re-asserted the key physically. Never move this re-check into
+            // the hook callback: there the spurious Up would still see the
+            // momentarily open switch (and the hook must keep its latency
+            // budget). Worst case (a genuine release misread as a bounce
+            // leaves a session running) the 5-minute session cap — renderer
+            // `setTimeout` and the Rust watchdog in `commands.rs`, dual
+            // backstops — and the tray Disable path still end the recording.
+            if should_treat_as_bounce(middle_button_key_state()) {
+                log::debug!("mouse: bounce-tolerant release ignored");
+                return;
+            }
+        }
         // Taking the token clears ownership unconditionally, as required for
         // every Stop decision.
-        let owned_id = OWNED_SESSION.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let owned_id = OWNED_SESSION
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let Some(owned_id) = owned_id else {
             return;
         };
@@ -254,8 +329,12 @@ mod win {
             // The session already ended on its own or was replaced (e.g.
             // keyboard PTT started a new one): never stop a foreign session
             // and never emit a bogus "no recording" error toast.
+            log::debug!(
+                "mouse: middle-button release ignored (owned session {owned_id} is no longer recording)"
+            );
             return;
         }
+        log::debug!("mouse: middle-button release stopping session {owned_id}");
         // The hook must return fast and the worker must keep draining events
         // in order (so a queued Start is decided against the current state,
         // not against a transcription that may run for a minute): run the
@@ -268,6 +347,28 @@ mod win {
         });
     }
 
+    /// `GetAsyncKeyState` high bit = "the key is currently down". The low bit
+    /// (0x01, "pressed since the last query") is history, not physical state.
+    const KEY_STATE_DOWN_HIGH_BIT: u16 = 0x8000;
+
+    /// Raw `GetAsyncKeyState(VK_MBUTTON)` result; see [`should_treat_as_bounce`]
+    /// for how the bits are read. One cheap, non-blocking Win32 call — safe
+    /// here on the worker, but never to be called from the hook callback.
+    fn middle_button_key_state() -> i16 {
+        // SAFETY: reading shared input state cannot fail and does not block.
+        unsafe { GetAsyncKeyState(VK_MBUTTON as i32) }
+    }
+
+    /// Pure bounce decision for a middle-button release: the release is a
+    /// hardware-switch bounce and must be ignored while the physical key is
+    /// still held — decided by the high bit (0x8000) of the raw
+    /// `GetAsyncKeyState` state, never by the low "pressed since the last
+    /// query" bit. Pure so the release semantics are unit-testable without a
+    /// real hook or keyboard.
+    fn should_treat_as_bounce(key_state: i16) -> bool {
+        (key_state as u16 & KEY_STATE_DOWN_HIGH_BIT) != 0
+    }
+
     /// True when the given root window (top-level window under the cursor at
     /// event time) is the HUD overlay. The hit test itself ran in the hook
     /// with pure Win32 calls; only this comparison needs Tauri (overlay
@@ -278,7 +379,9 @@ mod win {
             return false;
         };
         // `hwnd.0` is the raw pointer windows-sys expects (see windowing.rs).
-        win.hwnd().map(|hwnd| hwnd.0 as isize == root_hwnd).unwrap_or(false)
+        win.hwnd()
+            .map(|hwnd| hwnd.0 as isize == root_hwnd)
+            .unwrap_or(false)
     }
 
     /// Hook thread body: keep the message queue pumped (that is what delivers
@@ -328,23 +431,66 @@ mod win {
         }
     }
 
+    /// The session action a hook message may cause. `None` (from [`classify`])
+    /// means "no action": the message is ignored entirely.
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    enum Trigger {
+        /// `WM_MBUTTONDOWN`: begin a middle-button push-to-talk session.
+        Down,
+        /// `WM_MBUTTONUP`: end it (bounce-tolerant: the worker re-checks the
+        /// physical key state first, see [`should_treat_as_bounce`]).
+        Up,
+    }
+
+    /// Strict message-type whitelist: `WM_MBUTTONDOWN` / `WM_MBUTTONUP` and
+    /// nothing else. Pure so it can be unit-tested without a real hook.
+    ///
+    /// **Regression trap.** `WM_MOUSEWHEEL` (522) and `WM_MOUSEHWHEEL` (526)
+    /// sit *above* `WM_MBUTTONDOWN`/`WM_MBUTTONUP` (519/520) and *inside*
+    /// `WM_MOUSEFIRST..=WM_MOUSELAST` (512..=526). Widening this test in any way
+    /// — a range check (`WM_MBUTTONDOWN..=WM_MOUSELAST`), a threshold
+    /// (`message >= WM_MBUTTONDOWN`), the whole `WM_MOUSEFIRST..=WM_MOUSELAST`
+    /// span, or a "everything except `WM_MOUSEMOVE`" exclusion — silently maps
+    /// the wheel to Down/Up and re-introduces the reported bug where rolling the
+    /// wheel during a held middle button interrupts the recording. The low-level
+    /// hook receives the *message id* in `wParam` (never button state: for a
+    /// wheel, the high word of a window's `wParam` is the delta, but that rule
+    /// does not apply here). Only an exact `==` match keeps scrolling harmless
+    /// and the down/up pair intact.
+    fn classify(message: u32) -> Option<Trigger> {
+        // `as u32` on both sides keeps this independent of how windows-sys
+        // types the WM_* / hook-id constants.
+        if message == WM_MBUTTONDOWN as u32 {
+            Some(Trigger::Down)
+        } else if message == WM_MBUTTONUP as u32 {
+            Some(Trigger::Up)
+        } else {
+            None
+        }
+    }
+
     /// `WH_MOUSE_LL` callback. Observing only: `CallNextHookEx` always runs so
     /// the click keeps its normal meaning in the target application.
     ///
     /// Latency-critical (the system removes slow hooks): only local Win32
     /// calls plus a non-blocking enqueue — no Tauri calls, no locks, no I/O.
-    unsafe extern "system" fn low_level_mouse_proc(code: i32, wparam: usize, lparam: isize) -> isize {
+    unsafe extern "system" fn low_level_mouse_proc(
+        code: i32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize {
         if code >= 0 && lparam != 0 {
-            // `as u32` on both sides keeps this independent of how windows-sys
-            // types the WM_* / hook-id constants.
-            let message = wparam as u32;
-            if message == WM_MBUTTONDOWN as u32 {
-                let info = &*(lparam as *const MSLLHOOKSTRUCT);
-                post_event(MiddleEvent::Down {
-                    root_hwnd: root_window_at(info.pt),
-                });
-            } else if message == WM_MBUTTONUP as u32 {
-                post_event(MiddleEvent::Up);
+            match classify(wparam as u32) {
+                Some(Trigger::Down) => {
+                    let info = &*(lparam as *const MSLLHOOKSTRUCT);
+                    post_event(MiddleEvent::Down {
+                        root_hwnd: root_window_at(info.pt),
+                    });
+                }
+                Some(Trigger::Up) => post_event(MiddleEvent::Up),
+                // Wheel / move / other buttons: intentionally inert, so scrolling
+                // cannot disturb an in-flight middle-button PTT session.
+                None => {}
             }
         }
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
@@ -355,5 +501,89 @@ mod win {
     /// it). Child windows (WebView2) resolve to their top-level owner.
     fn root_window_at(point: POINT) -> isize {
         unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT as _) as isize }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MOUSEFIRST, WM_MOUSEHWHEEL,
+            WM_MOUSELAST, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+            WM_XBUTTONDOWN, WM_XBUTTONUP,
+        };
+
+        /// The only messages that may drive a middle-button PTT session.
+        #[test]
+        fn middle_button_messages_map_to_down_and_up() {
+            assert_eq!(classify(WM_MBUTTONDOWN as u32), Some(Trigger::Down));
+            assert_eq!(classify(WM_MBUTTONUP as u32), Some(Trigger::Up));
+        }
+
+        /// Regression: rolling the wheel — vertical (`WM_MOUSEWHEEL`) or
+        /// horizontal (`WM_MOUSEHWHEEL`) — during a held middle button must
+        /// produce no action at all, so the held down/up pair stays intact and
+        /// the recording is never interrupted.
+        #[test]
+        fn wheel_messages_are_inert() {
+            assert_eq!(classify(WM_MOUSEWHEEL as u32), None);
+            assert_eq!(classify(WM_MOUSEHWHEEL as u32), None);
+        }
+
+        /// Regression: every other mouse message (move, middle double-click,
+        /// left/right, X buttons) is inert too — the hook only ever tracks the
+        /// middle button press/release.
+        #[test]
+        fn other_mouse_messages_are_inert() {
+            for message in [
+                WM_MOUSEMOVE,
+                WM_MBUTTONDBLCLK,
+                WM_LBUTTONDOWN,
+                WM_LBUTTONUP,
+                WM_RBUTTONDOWN,
+                WM_RBUTTONUP,
+                WM_XBUTTONDOWN,
+                WM_XBUTTONUP,
+            ] {
+                assert_eq!(
+                    classify(message as u32),
+                    None,
+                    "message {message:#06x} must be inert"
+                );
+            }
+        }
+
+        /// Documents *why* [`classify`] must stay an exact `==` whitelist and
+        /// never become a range/threshold test: the wheel messages live between
+        /// `WM_MBUTTONDOWN` and `WM_MOUSELAST`, so a widened check would catch
+        /// them and re-introduce the "scrolling interrupts recording" bug that
+        /// these tests exist to prevent.
+        #[test]
+        fn wheel_messages_sit_inside_the_range_trap() {
+            for wheel in [WM_MOUSEWHEEL as u32, WM_MOUSEHWHEEL as u32] {
+                assert!(wheel > WM_MBUTTONUP as u32 && wheel <= WM_MOUSELAST as u32);
+                assert!((WM_MOUSEFIRST..=WM_MOUSELAST).contains(&wheel));
+            }
+        }
+
+        /// Regression (hardware bounce): while the physical middle button is
+        /// still held — high bit (0x8000) of `GetAsyncKeyState` set — a
+        /// release must be treated as a bounce and must NOT stop the session:
+        /// the worker keeps the session and the ownership token so the genuine
+        /// release can still stop later.
+        #[test]
+        fn release_while_still_held_is_a_bounce_and_must_not_stop() {
+            assert!(should_treat_as_bounce(0x8000u16 as i16));
+            // High bit wins even alongside other bits (low-bit history).
+            assert!(should_treat_as_bounce(0x8001u16 as i16));
+        }
+
+        /// A genuinely released key (high bit clear) must trigger the stop.
+        /// The low bit (0x01, "pressed since the last query") is history, not
+        /// physical state, and must never read as "still held".
+        #[test]
+        fn release_after_genuine_release_triggers_stop() {
+            assert!(!should_treat_as_bounce(0));
+            assert!(!should_treat_as_bounce(0x0001u16 as i16));
+        }
     }
 }

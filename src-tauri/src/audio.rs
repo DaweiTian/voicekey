@@ -2,6 +2,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Maximum recording session duration, in seconds. MUST stay identical to
+/// `RECORDING.SESSION_MAX_DURATION_SECONDS` in `src/shared/constants.ts`
+/// (locked by `session_max_duration_matches_renderer_contract` below): the
+/// renderer arms its own cap timer with this value, and the Rust-side
+/// watchdog (`commands::spawn_session_time_watchdog`) uses the same budget so
+/// the two backstops fire for the same session length.
+pub const SESSION_MAX_DURATION_SECONDS: u64 = 5 * 60;
+
+/// Whether a session that started at `started_at` (unix ms) has reached the
+/// maximum session duration as of `now` (unix ms). Pure so the watchdog's
+/// deadline decision is unit-testable.
+///
+/// `saturating_sub` fails safe on a clock that moved backwards (`now <
+/// started_at` reads as "not expired"): the watchdog then defers instead of
+/// killing a fresh session early. Under-firing is the acceptable direction -
+/// the tray Disable entry remains the outermost backstop.
+pub fn session_time_limit_reached(started_at: u64, now: u64) -> bool {
+    now.saturating_sub(started_at) >= SESSION_MAX_DURATION_SECONDS * 1000
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioChunkPayload {
@@ -60,6 +80,9 @@ pub struct AudioSession {
     pub sample_rate: u32,
     pub streaming_final: bool,
     pub final_chunk_seen: bool,
+    /// Session start (unix ms). Read by the time-limit watchdog
+    /// (`session_time_limit_reached`) to re-validate the deadline before
+    /// stopping an over-long session.
     pub started_at: u64,
 }
 
@@ -180,5 +203,39 @@ impl AudioSession {
             SessionStatus::Error => "error",
         }
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cap must stay identical to the renderer constant
+    /// (`RECORDING.SESSION_MAX_DURATION_SECONDS` in `src/shared/constants.ts`):
+    /// the renderer's `setTimeout` and the Rust watchdog are dual backstops for
+    /// the same session budget.
+    #[test]
+    fn session_max_duration_matches_renderer_contract() {
+        assert_eq!(SESSION_MAX_DURATION_SECONDS, 5 * 60);
+    }
+
+    #[test]
+    fn time_limit_not_reached_before_deadline() {
+        let started = 1_000_000u64;
+        assert!(!session_time_limit_reached(started, started));
+        assert!(!session_time_limit_reached(started, started + 299_999));
+    }
+
+    #[test]
+    fn time_limit_reached_at_and_after_deadline() {
+        let started = 1_000_000u64;
+        assert!(session_time_limit_reached(started, started + 300_000));
+        assert!(session_time_limit_reached(started, started + 300_001));
+    }
+
+    #[test]
+    fn time_limit_not_reached_when_clock_moves_backwards() {
+        // Fail safe: a backwards clock jump must never end a session early.
+        assert!(!session_time_limit_reached(2_000_000, 1_999_000));
     }
 }

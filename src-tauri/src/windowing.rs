@@ -13,6 +13,12 @@
 //!    whole main WebView process to reclaim memory. Reopening (tray menu /
 //!    settings hotkey / IPC) rebuilds it on demand through
 //!    [`ensure_main_window`] with the same configuration.
+//! 3. **HUD overlay rebuild.** The capsule window is normally only hidden and
+//!    shown (`commands::overlay_show` / `hide_overlay`), but if it ever gets
+//!    destroyed (a renderer close call, `core:window:allow-close`, before the
+//!    CloseRequested handler existed) [`ensure_overlay_window`] rebuilds it
+//!    from the same shape as the `overlay` entry in `tauri.conf.json`, so the
+//!    tray "Show floating capsule" entry can always bring it back.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -33,7 +39,8 @@ pub const OVERLAY_WINDOW_LABEL: &str = "overlay";
 /// Config persistence is safe well within this budget: the frontend's only
 /// delayed write is the 700ms debounced auto-save (`AUTO_SAVE_DELAY_MS` in
 /// `src/pages/SettingsPage.tsx`), which flushes through the synchronous
-/// `set_config` -> `ConfigStore::save` (`fs::write`) path as soon as the
+/// `set_config` -> `ConfigStore::merge` path (file write goes through the
+/// lock-held `save_unlocked`, whole call under `CONFIG_LOCK`) as soon as the
 /// debounce elapses while the hidden window is still alive. There are no other
 /// pending-save paths (every remaining write saves inline). Five minutes is far
 /// beyond that, so the destroy can never drop a pending save.
@@ -57,6 +64,13 @@ static DESTROY_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// deadlocks). Holding this lock is then always safe: no main-thread code can
 /// wait on it while a holder waits for the main thread.
 static MAIN_CREATION_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serializes overlay-window (re)creation for the same reason and with the
+/// same invariant as [`MAIN_CREATION_LOCK`]: [`ensure_overlay_window`] is only
+/// ever called from worker threads (`commands::overlay_show`'s rebuild thread),
+/// never from the main thread, because window creation blocks on the main
+/// thread's creation message (wry#583).
+static OVERLAY_CREATION_LOCK: Mutex<()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
 // Windows focus-frame hardening
@@ -235,7 +249,9 @@ pub fn schedule_main_window_destroy<R: tauri::Runtime>(app: &AppHandle<R>) {
 /// Threading: only call from worker threads - see [`MAIN_CREATION_LOCK`].
 pub fn ensure_main_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
     cancel_main_window_destroy();
-    let _guard = MAIN_CREATION_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = MAIN_CREATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         harden_main_window(&window);
         return Some(window);
@@ -278,7 +294,7 @@ fn build_main_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<Web
         MAIN_WINDOW_LABEL,
         tauri::WebviewUrl::App("index.html".into()),
     )
-    .title("Voice Key")
+    .title("芷若")
     .inner_size(1100.0, 720.0)
     .min_inner_size(600.0, 500.0)
     .resizable(true)
@@ -302,5 +318,81 @@ fn build_main_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<Web
 
     // Never leave a freshly built window with the system focus frame.
     harden_main_window(&window);
+    Ok(window)
+}
+
+// ---------------------------------------------------------------------------
+// HUD overlay rebuild lifecycle
+// ---------------------------------------------------------------------------
+
+/// Get the HUD overlay window, rebuilding it on demand if a close path
+/// destroyed it.
+///
+/// The capsule is normally only hidden (`commands::overlay_hide`), and the
+/// `CloseRequested` handler in `lib.rs` converts a renderer close into a
+/// hidden window. But any path that really destroys the overlay (e.g. a
+/// `close()` racing the handler on older builds) would otherwise make the
+/// capsule permanently irrecoverable: `AppHandle::get_webview_window` silently
+/// returns `None` and every show path becomes a no-op. Rebuilding here keeps
+/// the guarantee "the tray can always bring the capsule back".
+///
+/// Threading: only call from worker threads - see [`OVERLAY_CREATION_LOCK`].
+pub fn ensure_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
+    let _guard = OVERLAY_CREATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(window) = app.get_webview_window(OVERLAY_WINDOW_LABEL) {
+        harden_overlay_window(&window);
+        return Some(window);
+    }
+    match build_overlay_window(app) {
+        Ok(window) => Some(window),
+        Err(e) => {
+            // A concurrent rebuild won the race (duplicate label) or creation
+            // failed transiently: prefer the existing window over giving up.
+            log::warn!("overlay window build failed ({e}); falling back to the existing window");
+            let window = app.get_webview_window(OVERLAY_WINDOW_LABEL)?;
+            harden_overlay_window(&window);
+            Some(window)
+        }
+    }
+}
+
+/// Rebuild the HUD overlay with the same shape as the `overlay` entry in
+/// `tauri.conf.json` (280x64, transparent, always-on-top, skip-taskbar, not
+/// initially focused, hidden until shown). Keep the two in sync when the
+/// config changes.
+fn build_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
+    let window = tauri::WebviewWindowBuilder::new(
+        app,
+        OVERLAY_WINDOW_LABEL,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("芷若")
+    .inner_size(280.0, 64.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .build()?;
+
+    // Same CloseRequested -> hide behavior as the config-created window (the
+    // global `Builder::on_window_event` handler in `lib.rs` may already cover
+    // this rebuilt window; registering here is idempotent belt-and-braces,
+    // exactly like `build_main_window` above - hide and the flag sync are
+    // repeatable without side effects).
+    let handle = window.app_handle().clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            crate::commands::hide_overlay(&handle);
+        }
+    });
+
+    // Never leave a freshly built overlay without its no-activate hardening.
+    harden_overlay_window(&window);
     Ok(window)
 }

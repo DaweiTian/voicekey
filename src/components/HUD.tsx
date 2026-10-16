@@ -5,10 +5,26 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
+import { getCurrentWindow, type Window as TauriWindow } from '@tauri-apps/api/window'
+import { PhysicalPosition } from '@tauri-apps/api/dpi'
 import { AudioLines, Check, Globe, Mic, Sparkles, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { OverlayProcessingStage, OverlayState, OverlayStatus } from '@/shared/types'
 import { cn } from '../lib/utils'
+import {
+  initialOverlayDragState,
+  onDoubleClick,
+  onPointerCancel,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onWatchdog,
+  onWindowBlur,
+  setWinStart,
+  type DragCommand,
+  type OverlayDragState,
+  type PhysicalPoint,
+} from '../lib/overlayDrag'
 import { Waveform } from './Waveform'
 
 /** 窗口缩放到胶囊内容尺寸时的内边距（每侧 2px）。 */
@@ -145,6 +161,35 @@ export function HUD() {
   /** 上次已下发的窗口尺寸，尺寸未变不重复 invoke（录音电平帧高频重渲染）。 */
   const lastOverlaySizeRef = useRef<{ width: number; height: number } | null>(null)
 
+  /** 当前 Tauri overlay 窗口句柄（缓存以避免重复创建）。 */
+  const windowRef = useRef<TauriWindow | null>(null)
+
+  /** 拖拽状态机纯函数状态。 */
+  const dragRef = useRef<OverlayDragState>(initialOverlayDragState())
+  /** 拖拽移动节流：是否已有待处理的 rAF。 */
+  const dragMovePendingRef = useRef(false)
+  /** 拖拽移动节流：待下发的最新坐标。 */
+  const dragPendingPosRef = useRef<PhysicalPoint | null>(null)
+
+  /** 当前挂载的全局 pointermove / pointerup / pointercancel / blur 监听器。 */
+  const currentMoveHandlerRef = useRef<((event: PointerEvent) => void) | undefined>(undefined)
+  const currentUpHandlerRef = useRef<((event: PointerEvent) => void) | undefined>(undefined)
+  const currentCancelHandlerRef = useRef<((event: PointerEvent) => void) | undefined>(undefined)
+  const currentBlurHandlerRef = useRef<(() => void) | undefined>(undefined)
+
+  /** 看门狗定时器：拖拽 / pending 状态下 N 秒无事件则强制复位。 */
+  const watchdogTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  /** 命令执行器 ref：在渲染期间保持最新，供全局事件处理器读取。 */
+  const executeDragCommandsRef = useRef<(cmds: DragCommand[]) => void>(() => {})
+
+  const getOverlayWindow = useCallback((): TauriWindow => {
+    if (!windowRef.current) {
+      windowRef.current = getCurrentWindow()
+    }
+    return windowRef.current
+  }, [])
+
   useEffect(() => {
     document.documentElement.classList.add('overlay-html')
     rafIdRef.current = requestAnimationFrame(() => setIsVisible(true))
@@ -155,6 +200,8 @@ export function HUD() {
       if (measureRafRef.current !== null) {
         cancelAnimationFrame(measureRafRef.current)
       }
+      removeDragListeners()
+      clearWatchdog()
       document.documentElement.classList.remove('overlay-html')
     }
   }, [])
@@ -179,7 +226,7 @@ export function HUD() {
   useEffect(() => {
     statusRef.current = overlayState.status
     // 窗口已缩到内容大小（见 scheduleOverlayResize），整窗即胶囊、无死区，所有
-    // 状态保持可点击（待机 = 按住说话，录音 / 处理 = 取消按钮）。不做 hover 穿透：
+    // 状态保持可点击（待机 = 按住说话 / 拖拽，录音 / 处理 = 取消按钮）。不做 hover 穿透：
     // Tauri `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，一旦
     // 穿透 mouseenter 不再可达，胶囊（含取消按钮）会永久点不到。
     window.electronAPI.setIgnoreMouseEvents(false)
@@ -187,11 +234,13 @@ export function HUD() {
 
   /**
    * 状态 / 文案变化后测量胶囊实际内容尺寸，把 overlay 窗口缩到内容大小
-   * （每侧 2px 内边距；Rust `set_overlay_size` 钳制尺寸合法性并保持底部居中）。
+   * （每侧 2px 内边距；Rust `set_overlay_size` 钳制尺寸合法性）。
    * 在 rAF 中取 `getBoundingClientRect` 等布局落定；测量容器自身无 transform，
    * 故 rect 不受入场 / 按压缩放动画干扰。尺寸不变则去重、不重复 invoke。
+   * 拖拽期间抑制调用，避免 set_overlay_size 用持久化位置重新锚定导致窗口跳回旧点。
    */
   const scheduleOverlayResize = useCallback(() => {
+    if (dragRef.current.resizeSuppressed) return
     if (measureRafRef.current !== null) return
     measureRafRef.current = requestAnimationFrame(() => {
       measureRafRef.current = null
@@ -217,10 +266,7 @@ export function HUD() {
   })
 
   /** pointerdown：按住说话（左键 / 中键）。语义与 PTT 心智一致，绝不做切换。 */
-  const handleHoldStart = (event: ReactPointerEvent) => {
-    if (event.button !== 0 && event.button !== 1) return
-    // 仅待机态由胶囊发起会话；录音 / 处理态的按下交给各自按钮（如取消），
-    // 防止「点取消 → 误开始」。
+  const handleHoldStart = () => {
     if (statusRef.current !== 'idle') return
     if (holdActiveRef.current) return
     holdActiveRef.current = true
@@ -237,7 +283,231 @@ export function HUD() {
   }
 
   const handleCancel = () => {
+    holdActiveRef.current = false
     window.electronAPI.cancelSession()
+  }
+
+  /** 释放 pointer capture；失败时静默忽略（window 监听器仍可兜底）。 */
+  const releasePointerCapture = (pointerId: number) => {
+    try {
+      measureRef.current?.releasePointerCapture(pointerId)
+    } catch {
+      // ignore
+    }
+  }
+
+  /** 挂载全局指针 / blur 监听器。 */
+  const addDragListeners = () => {
+    removeDragListeners()
+
+    const move = (event: PointerEvent) => {
+      const [nextState, cmds] = onPointerMove(
+        { pointerId: event.pointerId, screenX: event.screenX, screenY: event.screenY },
+        dragRef.current,
+        Date.now(),
+      )
+      dragRef.current = nextState
+      executeDragCommandsRef.current(cmds)
+    }
+    const up = (event: PointerEvent) => {
+      const [nextState, cmds] = onPointerUp(
+        { pointerId: event.pointerId, screenX: event.screenX, screenY: event.screenY },
+        dragRef.current,
+        Date.now(),
+      )
+      dragRef.current = nextState
+      executeDragCommandsRef.current(cmds)
+    }
+    const cancel = (event: PointerEvent) => {
+      const [nextState, cmds] = onPointerCancel(
+        { pointerId: event.pointerId },
+        dragRef.current,
+        Date.now(),
+      )
+      dragRef.current = nextState
+      executeDragCommandsRef.current(cmds)
+    }
+    const blur = () => {
+      const [nextState, cmds] = onWindowBlur(dragRef.current)
+      dragRef.current = nextState
+      executeDragCommandsRef.current(cmds)
+    }
+
+    currentMoveHandlerRef.current = move
+    currentUpHandlerRef.current = up
+    currentCancelHandlerRef.current = cancel
+    currentBlurHandlerRef.current = blur
+
+    window.addEventListener('pointermove', move, true)
+    window.addEventListener('pointerup', up, true)
+    window.addEventListener('pointercancel', cancel, true)
+    window.addEventListener('blur', blur, true)
+  }
+
+  /** 卸载全局指针 / blur 监听器。 */
+  const removeDragListeners = () => {
+    if (currentMoveHandlerRef.current) {
+      window.removeEventListener('pointermove', currentMoveHandlerRef.current, true)
+      currentMoveHandlerRef.current = undefined
+    }
+    if (currentUpHandlerRef.current) {
+      window.removeEventListener('pointerup', currentUpHandlerRef.current, true)
+      currentUpHandlerRef.current = undefined
+    }
+    if (currentCancelHandlerRef.current) {
+      window.removeEventListener('pointercancel', currentCancelHandlerRef.current, true)
+      currentCancelHandlerRef.current = undefined
+    }
+    if (currentBlurHandlerRef.current) {
+      window.removeEventListener('blur', currentBlurHandlerRef.current, true)
+      currentBlurHandlerRef.current = undefined
+    }
+  }
+
+  /** 把当前窗口物理坐标持久化到 Rust（贴边吸附 / 工作区钳制由 Rust 完成）。 */
+  const persistDragPosition = useCallback(async () => {
+    try {
+      const win = getOverlayWindow()
+      const pos = await win.outerPosition()
+      await window.electronAPI.setOverlayPosition(pos.x, pos.y)
+    } catch {
+      // 持久化失败不阻塞 UI，下次拖拽会重试
+    }
+  }, [getOverlayWindow])
+
+  /** 拖拽移动节流 flush：在下一帧把窗口移动到最新坐标。 */
+  const flushDragMove = useCallback(() => {
+    dragMovePendingRef.current = false
+    const pos = dragPendingPosRef.current
+    dragPendingPosRef.current = null
+    if (!pos) return
+    const win = getOverlayWindow()
+    win.setPosition(new PhysicalPosition(pos.x, pos.y)).catch(() => {})
+  }, [getOverlayWindow])
+
+  /** 收到新的拖拽目标坐标时，rAF 节流下发窗口移动。 */
+  const scheduleDragMove = useCallback(
+    (pos: PhysicalPoint) => {
+      dragPendingPosRef.current = pos
+      if (!dragMovePendingRef.current) {
+        dragMovePendingRef.current = true
+        requestAnimationFrame(flushDragMove)
+      }
+    },
+    [flushDragMove],
+  )
+
+  /** 启动 / 重置看门狗：拖拽 / pending 状态无事件 N 秒后强制复位。 */
+  const startWatchdog = (deadline: number) => {
+    clearWatchdog()
+    const delay = Math.max(0, deadline - Date.now())
+    watchdogTimeoutRef.current = setTimeout(() => {
+      const [nextState, cmds] = onWatchdog(dragRef.current, Date.now())
+      dragRef.current = nextState
+      executeDragCommandsRef.current(cmds)
+    }, delay)
+  }
+
+  /** 清除看门狗定时器。 */
+  const clearWatchdog = () => {
+    if (watchdogTimeoutRef.current !== null) {
+      clearTimeout(watchdogTimeoutRef.current)
+      watchdogTimeoutRef.current = null
+    }
+  }
+
+  /** 执行拖拽状态机返回的命令。 */
+  const executeDragCommands = (cmds: DragCommand[]) => {
+    for (const cmd of cmds) {
+      switch (cmd.type) {
+        case 'start-session':
+          handleHoldStart()
+          break
+        case 'stop-session':
+          handleHoldEnd()
+          break
+        case 'cancel-session':
+          handleCancel()
+          break
+        case 'set-overlay-position':
+          window.electronAPI.setOverlayPosition(cmd.x, cmd.y).catch(() => {})
+          break
+        case 'release-pointer-capture':
+          releasePointerCapture(cmd.pointerId)
+          break
+        case 'add-listeners':
+          addDragListeners()
+          break
+        case 'remove-listeners':
+          removeDragListeners()
+          break
+        case 'start-watchdog':
+          startWatchdog(cmd.deadline)
+          break
+        case 'clear-watchdog':
+          clearWatchdog()
+          break
+        case 'suppress-resize':
+          // resizeSuppressed 已在状态机状态中更新，无需额外动作
+          break
+        case 'allow-resize':
+          scheduleOverlayResize()
+          break
+        case 'move':
+          scheduleDragMove(cmd.pos)
+          break
+        case 'flush-move':
+          flushDragMove()
+          break
+        case 'persist-position':
+          persistDragPosition()
+          break
+      }
+    }
+  }
+  executeDragCommandsRef.current = executeDragCommands
+
+  /** 待机胶囊 pointerdown：同时启动按住说话与拖拽监听。 */
+  const handleIdlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const [nextState, cmds] = onPointerDown(
+      {
+        button: event.button,
+        pointerId: event.pointerId,
+        screenX: event.screenX,
+        screenY: event.screenY,
+      },
+      dragRef.current,
+      Date.now(),
+      statusRef.current,
+    )
+    dragRef.current = nextState
+
+    if (nextState.pointerId !== null) {
+      try {
+        event.currentTarget.setPointerCapture(nextState.pointerId)
+      } catch {
+        // setPointerCapture 在某些平台 / 元素上可能失败；window 监听器兜底
+      }
+    }
+
+    executeDragCommands(cmds)
+
+    // 异步解析窗口起始物理坐标与缩放因子，供拖拽移动计算使用。
+    if (nextState.phase === 'pending') {
+      const win = getOverlayWindow()
+      Promise.all([win.outerPosition().then((pos) => ({ x: pos.x, y: pos.y })), win.scaleFactor()])
+        .then(([pos, factor]) => {
+          dragRef.current = setWinStart(dragRef.current, pos, factor)
+        })
+        .catch(() => {})
+    }
+  }
+
+  /** 待机胶囊双击：重置到默认底部居中位置。 */
+  const handleIdleDoubleClick = () => {
+    const [nextState, cmds] = onDoubleClick(dragRef.current, Date.now())
+    dragRef.current = nextState
+    executeDragCommands(cmds)
   }
 
   const { status, message, processingStage, transcript = '' } = overlayState
@@ -262,22 +532,23 @@ export function HUD() {
       {/* 测量容器：无自身 transform，rect 恒等于胶囊布局尺寸，供窗口缩放 */}
       <div ref={measureRef} className="flex shrink-0">
         {status === 'idle' ? (
-          // 待机态：小尺寸低调胶囊，点击 = 按住说话（pointerdown/up 语义，不做切换）
+          // 待机态：小尺寸低调胶囊，pointerdown = 按住说话 / 开始拖拽判定
           <button
             type="button"
             className={cn(
               'pointer-events-auto flex h-9 select-none items-center gap-2 rounded-full',
-              'border border-white/10 bg-neutral-950/70 px-3.5 backdrop-blur-xl touch-none',
+              'bg-neutral-950/70 px-3.5 ring-1 ring-white/[0.06] backdrop-blur-xl touch-none',
               'shadow-[0_12px_32px_-12px_rgba(0,0,0,0.65)]',
               'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-95',
               isVisible
                 ? 'translate-y-0 scale-100 opacity-100 blur-0'
                 : 'translate-y-2 scale-95 opacity-0 blur-sm',
             )}
-            onPointerDown={handleHoldStart}
+            onPointerDown={handleIdlePointerDown}
             onPointerUp={handleHoldEnd}
             onPointerCancel={handleHoldEnd}
             onPointerLeave={handleHoldEnd}
+            onDoubleClick={handleIdleDoubleClick}
             onContextMenu={(event) => event.preventDefault()}
             title={t('hud.holdToTalk')}
             aria-label={t('hud.holdToTalk')}
@@ -291,7 +562,7 @@ export function HUD() {
           <div
             className={cn(
               'pointer-events-auto relative flex h-[52px] w-[268px] items-center gap-2.5 rounded-full',
-              'border border-white/10 bg-neutral-950/85 px-3 backdrop-blur-xl',
+              'bg-neutral-950/85 px-3 ring-1 ring-white/[0.06] backdrop-blur-xl',
               'shadow-[0_12px_32px_-12px_rgba(0,0,0,0.65),0_4px_10px_-4px_rgba(0,0,0,0.4)]',
               'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]',
               isVisible

@@ -197,6 +197,11 @@ export const tauriApi = {
   setOverlaySize: (width: number, height: number) =>
     invoke<void>('set_overlay_size', { width, height }),
 
+  // Overlay 窗口位置持久化：渲染层在拖拽释放后把物理像素坐标发给 Rust，
+  // Rust 负责贴边吸附、工作区钳制、持久化；传 null, null 表示重置为底部居中。
+  setOverlayPosition: (x: number | null, y: number | null) =>
+    invoke<void>('set_overlay_position', { x, y }),
+
   // updates
   checkForUpdates: () => invoke<UpdateInfo>('check_for_updates'),
   getUpdateStatus: () => invoke<UpdateInfo | null>('get_update_status'),

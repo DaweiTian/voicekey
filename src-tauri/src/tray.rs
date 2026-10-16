@@ -3,10 +3,29 @@
 //! second, menu-less tray icon, which showed up as a duplicate (blank) entry
 //! in the Windows taskbar overflow.
 
+use std::sync::Mutex;
+
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_autostart::ManagerExt;
+
+/// Setter for the "Show floating capsule" checkmark, registered by
+/// [`setup_tray`] in type-erased form so capsule visibility changes that
+/// happen outside the tray (e.g. closing the capsule window directly) can
+/// still keep the menu state in sync through [`set_overlay_menu_checked`].
+static OVERLAY_CHECK_SETTER: Mutex<Option<Box<dyn Fn(bool) + Send + Sync>>> = Mutex::new(None);
+
+/// Keep the tray "Show floating capsule" checkmark in sync with the capsule's
+/// persisted visibility (`commands::sync_overlay_visibility_flag`).
+pub fn set_overlay_menu_checked(checked: bool) {
+    let setter = OVERLAY_CHECK_SETTER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(set) = setter.as_ref() {
+        set(checked);
+    }
+}
 
 /// Toggle launch-at-login from the tray menu and refresh the checkmark from
 /// the plugin's real state so the menu never drifts from the OS setting.
@@ -36,7 +55,7 @@ fn toggle_autostart<R: Runtime>(app: &AppHandle<R>, item: &CheckMenuItem<R>) {
 }
 
 pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let show = MenuItem::with_id(app, "show", "Open Voice Key", true, None::<&str>)
+    let show = MenuItem::with_id(app, "show", "Open Zhiruo", true, None::<&str>)
         .map_err(|e| e.to_string())?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)
         .map_err(|e| e.to_string())?;
@@ -71,10 +90,21 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
         None::<&str>,
     )
     .map_err(|e| e.to_string())?;
-    let overlay_toggle_item = overlay_toggle.clone();
+    // Register the checkmark sync so visibility changes outside the tray
+    // (e.g. closing the capsule window) keep this menu item in step.
+    let overlay_toggle_sync = overlay_toggle.clone();
+    *OVERLAY_CHECK_SETTER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move |checked| {
+        // Never fail silently: a stuck checkmark would make the tray entry
+        // lie about the capsule state and is hard to diagnose otherwise.
+        if let Err(e) = overlay_toggle_sync.set_checked(checked) {
+            log::warn!("tray: floating-capsule checkmark sync failed: {e}");
+        }
+    }));
     let separator_bottom = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)
-        .map_err(|e| e.to_string())?;
+    let quit =
+        MenuItem::with_id(app, "quit", "Quit", true, None::<&str>).map_err(|e| e.to_string())?;
 
     let menu = Menu::with_items(
         app,
@@ -97,7 +127,7 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 
     TrayIconBuilder::with_id("main-tray")
         .icon(icon)
-        .tooltip("Voice Key")
+        .tooltip("芷若")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id.as_ref() {
@@ -107,27 +137,24 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
             }
             "autostart" => toggle_autostart(app, &autostart_item),
             "overlay-toggle" => {
-                // Flip the persisted capsule visibility and show/hide the HUD
-                // accordingly. Hidden capsule: PTT hotkey and middle-click
-                // triggers keep working, they just show no HUD.
+                // Decide from the capsule's *actual* window visibility, never
+                // from the persisted flag: the two can drift when another path
+                // (e.g. closing the capsule window from the renderer) hides or
+                // destroys it without writing the flag, and this entry must
+                // always be able to bring the capsule back. The show/hide
+                // helpers re-sync `app.overlayVisible` and the checkmark to
+                // the state actually reached (Windows menus auto-toggle their
+                // checkmark on click, macOS does not; setting it explicitly
+                // keeps both in step).
                 let visible = app
-                    .try_state::<crate::state::AppState>()
-                    .map(|s| s.config.load().app.overlay_visible)
-                    .unwrap_or(true);
-                let next = !visible;
-                if let Some(state) = app.try_state::<crate::state::AppState>() {
-                    let _ = state.config.merge(&serde_json::json!({
-                        "app": { "overlayVisible": next }
-                    }));
-                }
-                if next {
-                    crate::commands::show_overlay_idle(app);
-                } else {
+                    .get_webview_window(crate::windowing::OVERLAY_WINDOW_LABEL)
+                    .and_then(|w| w.is_visible().ok())
+                    .unwrap_or(false);
+                if visible {
                     crate::commands::hide_overlay(app);
+                } else {
+                    crate::commands::show_overlay_forced(app);
                 }
-                // Windows menus auto-toggle their checkmark on click, macOS
-                // does not; set it explicitly so both stay in sync.
-                let _ = overlay_toggle_item.set_checked(next);
             }
             "quit" => {
                 app.exit(0);

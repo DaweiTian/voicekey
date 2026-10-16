@@ -22,6 +22,15 @@ export interface DictationStats {
  * Rust `src-tauri/src/stats.rs` 独立持久化的累计统计（`voice-key-stats.json`，
  * serde camelCase）。只增不减：不受历史删除与 90 天保留裁剪影响。
  */
+export interface StoredDayStats {
+  /** 当日成功识别会话数 */
+  sessions: number
+  /** 当日识别字符数（非空白，见 `countCharacters`） */
+  characters: number
+  /** 当日录音音频毫秒数（未知时长计 0） */
+  audioMs: number
+}
+
 export interface StoredDictationStats {
   version: number
   backfilled: boolean
@@ -30,8 +39,8 @@ export interface StoredDictationStats {
     characters: number
     audioMs: number
   }
-  /** 本地日键 `YYYY-MM-DD` -> 当日识别字符数 */
-  daily: Record<string, number>
+  /** 本地日键 `YYYY-MM-DD` -> 当日统计（次数 / 字符数 / 音频毫秒） */
+  daily: Record<string, StoredDayStats>
 }
 
 /**
@@ -74,12 +83,36 @@ function derivePeak(daily: Map<string, number> | Record<string, number>): {
 }
 
 /**
- * 从听写历史计算概览统计（今日 / 近 N 天 / 累计 / 活跃天数 / 峰值日）。
+ * 近 `rangeDays` 个**日历日**（含今天）的窗口求和，按本地 dayKey 逐日取
+ * `stored.daily`。持久化日粒度只到「天」，无法还原历史聚合原来的滑动毫秒窗，
+ * 但日历日窗更直观，且与 dayKey 口径一致。
+ */
+function sumRecentCalendarDays(
+  daily: Record<string, StoredDayStats>,
+  rangeDays: number,
+  now: Date,
+): { sessions: number; characters: number; audioMs: number } {
+  let sessions = 0
+  let characters = 0
+  let audioMs = 0
+  for (let i = 0; i < rangeDays; i += 1) {
+    const entry =
+      daily[buildDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - i))]
+    if (!entry) continue
+    sessions += entry.sessions
+    characters += entry.characters
+    audioMs += entry.audioMs
+  }
+  return { sessions, characters, audioMs }
+}
+
+/**
+ * 从听写历史与 Rust 持久化统计计算概览（今日 / 近 N 天 / 累计 / 活跃天数 / 峰值日）。
  *
- * 合并语义：累计类字段（totalCharacters / totalAudioMs / activeDays / 峰值日）
- * 优先取 `stored`（Rust 侧独立持久化、无限累加，历史删除 / 90 天裁剪不影响）；
- * 窗口类字段（今日、近 N 天）始终由 `historyItems` 实时聚合。`stored` 缺失
- * （老版本回退 / get_stats 失败）时优雅降级为纯历史聚合，不抛错。
+ * 合并语义：`stored` 存在时**所有字段**均取 `stored`（Rust 侧独立持久化、只增不减，
+ * 历史删除 / 90 天裁剪不影响）——累计类直接读 `totals`；今日读 `daily[todayKey]`；
+ * 近 N 天按日历日求和 `daily`。`stored` 缺失（老版本回退 / `get_stats` 失败）时
+ * 整体降级为纯历史实时聚合，不抛错（此时窗口字段才会随历史删除而缩水）。
  */
 export function computeStats(
   historyItems: HistoryItem[],
@@ -90,11 +123,9 @@ export function computeStats(
   const historyTotalAudioMs = sumValues(historyItems.map((item) => item.duration ?? 0))
 
   const now = new Date()
+  // 回退口径（仅 stored 缺失时使用）：滑动毫秒窗 + 当日时间戳过滤。
   const cutoff = new Date(now.getTime() - rangeDays * 24 * 60 * 60 * 1000)
   const recentItems = historyItems.filter((item) => item.timestamp >= cutoff.getTime())
-  const recentCharacters = sumValues(recentItems.map((item) => countCharacters(item.text)))
-  const recentAudioMs = sumValues(recentItems.map((item) => item.duration ?? 0))
-
   const todayStart = new Date(
     now.getFullYear(),
     now.getMonth(),
@@ -116,27 +147,39 @@ export function computeStats(
   const todayItems = historyItems.filter(
     (item) => item.timestamp >= todayStart && item.timestamp <= todayEnd,
   )
-  const todaySessions = todayItems.length
-  const todayDuration = sumValues(todayItems.map((item) => item.duration ?? 0))
-  const todayCharacters = sumValues(todayItems.map((item) => countCharacters(item.text)))
 
-  const dailyMap = new Map<string, number>()
+  const historyDailyMap = new Map<string, number>()
   historyItems.forEach((item) => {
     const key = buildDateKey(new Date(item.timestamp))
-    dailyMap.set(key, (dailyMap.get(key) ?? 0) + countCharacters(item.text))
+    historyDailyMap.set(key, (historyDailyMap.get(key) ?? 0) + countCharacters(item.text))
   })
 
-  const { peakDayCharacters, peakDayKey } = stored ? derivePeak(stored.daily) : derivePeak(dailyMap)
+  const storedToday = stored?.daily[buildDateKey(now)]
+  const storedRecent = stored ? sumRecentCalendarDays(stored.daily, rangeDays, now) : null
+  const dailyCharsForPeak: Map<string, number> | Record<string, number> = stored
+    ? Object.fromEntries(
+        Object.entries(stored.daily).map(([key, day]) => [key, day.characters] as const),
+      )
+    : historyDailyMap
+  const { peakDayCharacters, peakDayKey } = derivePeak(dailyCharsForPeak)
 
   return {
     totalCharacters: stored ? stored.totals.characters : historyTotalCharacters,
     totalAudioMs: stored ? stored.totals.audioMs : historyTotalAudioMs,
-    recentCharacters,
-    recentAudioMs,
-    todaySessions,
-    todayDuration,
-    todayCharacters,
-    activeDays: stored ? Object.keys(stored.daily).length : dailyMap.size,
+    recentCharacters: storedRecent
+      ? storedRecent.characters
+      : sumValues(recentItems.map((item) => countCharacters(item.text))),
+    recentAudioMs: storedRecent
+      ? storedRecent.audioMs
+      : sumValues(recentItems.map((item) => item.duration ?? 0)),
+    todaySessions: stored ? (storedToday?.sessions ?? 0) : todayItems.length,
+    todayDuration: stored
+      ? (storedToday?.audioMs ?? 0)
+      : sumValues(todayItems.map((item) => item.duration ?? 0)),
+    todayCharacters: stored
+      ? (storedToday?.characters ?? 0)
+      : sumValues(todayItems.map((item) => countCharacters(item.text))),
+    activeDays: stored ? Object.keys(stored.daily).length : historyDailyMap.size,
     peakDayCharacters,
     peakDayKey,
   }

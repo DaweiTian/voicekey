@@ -1,12 +1,28 @@
 {
   "app": {
-    "name": "Voice Key",
-    "tagline": "说出文字",
+    "name": "芷若",
+    "tagline": "言若有声，芷若知心。",
     "version": "版本 {{version}}"
+  },
+  "changelog": {
+    "title": "更新日志",
+    "description": "按版本排列的变更历史",
+    "empty": "暂无更新日志",
+    "openTitle": "查看更新日志",
+    "view": "查看更新日志"
   },
   "theme": {
     "light": "浅色",
-    "dark": "深色"
+    "dark": "深色",
+    "accent": {
+      "label": "选择强调色",
+      "gulfBlue": "海湾蓝",
+      "oliveGreen": "橄榄绿",
+      "lavaOrange": "熔岩橙",
+      "sunsetPurple": "霞光紫",
+      "elegantGrey": "雅灰",
+      "classic": "经典"
+    }
   },
   "nav": {
     "home": "首页",
@@ -88,6 +104,12 @@
     "descAsr": "识别在本机完成，音频不会上传。",
     "descRefine": "共用一套大模型连接",
     "descLogs": "排查问题时使用",
+    "appearance": {
+      "title": "外观",
+      "description": "主题模式、强调色与界面风格",
+      "themeMode": "主题模式",
+      "accentColor": "强调色"
+    },
     "connectionTitle": "连接状态",
     "aboutHint": "保持更新以获得最佳体验",
     "health": {
@@ -104,7 +126,7 @@
       "selectedTextTranslation": "选中文本",
       "translationOff": "未启用"
     },
-    "about": "关于 Voice Key",
+    "about": "关于芷若",
     "version": "当前版本：v{{version}}",
     "checkUpdate": "检查更新",
     "checkingUpdate": "检查中...",
@@ -116,10 +138,10 @@
     "appLanguage": "界面语言",
     "systemLanguage": "跟随系统",
     "autoLaunch": "开机自动启动",
-    "autoLaunchHelp": "系统登录时在后台启动 Voice Key，不自动打开窗口",
+    "autoLaunchHelp": "系统登录时在后台启动芷若，不自动打开窗口",
     "linuxIntegration": {
       "title": "Linux 与 Omarchy 集成",
-      "description": "将 Voice Key 接入 Hyprland，在 Wayland 下可靠识别按下/松开，并稳定注入中英文文本。",
+      "description": "将芷若接入 Hyprland，在 Wayland 下可靠识别按下/松开，并稳定注入中英文文本。",
       "ready": "Hyprland 集成已就绪",
       "x11Ready": "Linux X11 键盘后端已就绪",
       "installedNeedsRepair": "集成已安装，但需要更新",
@@ -134,11 +156,11 @@
       },
       "connected": "已连接",
       "actionRequired": "需要处理",
-      "x11Fallback": "Voice Key 当前使用原有的 Linux X11 键盘后端，此会话无需安装 Hyprland 集成。",
-      "waylandUnsupported": "当前 Wayland 合成器不提供 Voice Key 所需的 Hyprland 接口。现阶段优先支持 Omarchy/Hyprland；其他发行版可先使用 X11 会话。",
+      "x11Fallback": "芷若当前使用原有的 Linux X11 键盘后端，此会话无需安装 Hyprland 集成。",
+      "waylandUnsupported": "当前 Wayland 合成器不提供芷若所需的 Hyprland 接口。现阶段优先支持 Omarchy/Hyprland；其他发行版可先使用 X11 会话。",
       "conflicts": "安装前请先处理这些已有的 Hyprland 快捷键：{{conflicts}}",
       "configPath": "受管理的用户配置",
-      "backupHelp": "Voice Key 只修改带标记的配置块，并在同目录保留一次性备份；移除集成不会影响其他快捷键。",
+      "backupHelp": "芷若只修改带标记的配置块，并在同目录保留一次性备份；移除集成不会影响其他快捷键。",
       "install": "安装集成",
       "repair": "更新集成",
       "remove": "移除集成",
@@ -203,7 +225,7 @@
       "systemDefault": "系统默认麦克风",
       "refresh": "检测",
       "detecting": "检测中...",
-      "help": "选择 Voice Key 录音时使用的输入设备。",
+      "help": "选择芷若录音时使用的输入设备。",
       "noDevices": "未检测到麦克风",
       "deviceFallback": "麦克风 {{index}}",
       "unknownDevice": "已选择的麦克风",
@@ -415,7 +437,7 @@
     "settings": "设置",
     "overlayToggle": "显示悬浮胶囊",
     "quit": "退出",
-    "tooltip": "Voice Key"
+    "tooltip": "芷若"
   },
   "titleBar": {
     "label": "窗口标题栏",
@@ -425,7 +447,7 @@
     "close": "关闭"
   },
   "window": {
-    "settingsTitle": "Voice Key 设置"
+    "settingsTitle": "芷若设置"
   },
   "errors": {
     "ffmpegInitFailed": "FFmpeg 初始化失败",

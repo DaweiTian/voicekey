@@ -1,6 +1,6 @@
-# Voice Key Website
+# Zhiruo Website
 
-Astro static marketing site for Voice Key. It is published with Cloudflare Workers Static Assets at
+Astro static marketing site for 芷若 (Zhiruo). It is published with Cloudflare Workers Static Assets at
 `https://voicekey.buildwithais.com` and provides English and Chinese routes.
 
 ## Commands
