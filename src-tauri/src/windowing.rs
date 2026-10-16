@@ -11,8 +11,11 @@
 //!    with `WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` and only
 //!    hides them by collapsing the client area - a hidden trap that makes Windows
 //!    paint a native titlebar (minimize / restore / close buttons + a frame line
-//!    above the capsule) once any non-client area exists. Every helper is
-//!    idempotent so it can be re-applied on each show without side effects.
+//!    above the capsule) once any non-client area exists. The overlay also has
+//!    its Windows 11 DWM system backdrop / rounded-corner base cleared
+//!    ([`clear_dwm_window_backdrop`]) so DWM cannot composite an opaque
+//!    rectangle behind the capsule. Every helper is idempotent so it can be
+//!    re-applied on each show without side effects.
 //! 2. **Main window hide-to-tray lifecycle.** Closing the main window hides it
 //!    to the tray and arms a [`MAIN_DESTROY_DELAY`] timer that destroys the
 //!    whole main WebView process to reclaim memory. Reopening (tray menu /
@@ -199,16 +202,94 @@ fn strip_native_frame<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     }
 }
 
+/// Remove every opaque *base* DWM can paint behind the capsule window.
+///
+/// Why this exists: the capsule must show nothing but its own WebView2 content,
+/// yet on Windows 11 the frame-stripping above only removes the native
+/// *non-client* frame. DWM still owns three independent, opaque-capable layers
+/// that are **not** part of the non-client area and are therefore invisible to
+/// `strip_native_frame`:
+///
+/// 1. `DWMWA_SYSTEMBACKDROP_TYPE` defaults to `DWMSBT_AUTO` (0) on Windows 11.
+///    `AUTO` lets DWM pick a system backdrop for the window, and for the
+///    borderless, always-on-top, `WS_POPUP` capsule it can resolve to a
+///    translucent Acrylic surface (`DWMSBT_TRANSIENTWINDOW`). An Acrylic
+///    backdrop is *sampled from what is composited underneath*, so it is the
+///    one DWM layer whose appearance depends on the window behind the capsule -
+///    exactly the reported signature: the capsule is clean over the desktop /
+///    other apps but paints a white/gray rectangle **only while it floats over
+///    our own (light) main window**. Forcing `DWMSBT_NONE` removes it.
+/// 2. `DWMWA_WINDOW_CORNER_PREFERENCE` defaults to rounding the top corners on
+///    Windows 11. Rounding clips DWM's base surface into view as a rounded
+///    rectangle wherever the capsule is not, so it is pinned to `DONOTROUND`.
+/// 3. `DWMWA_NCRENDERING_POLICY` is disabled so DWM never falls back to
+///    rendering a non-client (opaque) base for the window.
+///
+/// Windows 11 22H2+ honors these attributes and silently ignores them on older
+/// systems, so the call is safe everywhere. Idempotent: safe on every hardening
+/// pass. Requires only the already-enabled `Win32_Graphics_Dwm` feature (the
+/// `DWM_BLURBEHIND`/region APIs - which *would* need `Win32_Graphics_Gdi` and
+/// cannot be re-asserted here - are deliberately not used; see the module
+/// README for the follow-up option).
+#[cfg(target_os = "windows")]
+fn clear_dwm_window_backdrop<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMSBT_NONE, DWMWA_NCRENDERING_POLICY,
+        DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let hwnd_ptr = hwnd.0;
+    // Every attribute below is a 32-bit integer value read by DWM from the
+    // buffer; pass a pointer to a local of the attribute's own type (all are
+    // i32-backed `DWMWINDOWATTRIBUTE` payloads) with its real size.
+    let attr_size = std::mem::size_of::<u32>() as u32;
+    unsafe {
+        // No DWM non-client rendering: no opaque base fill for the window.
+        let nc_policy = DWMNCRP_DISABLED;
+        let _ = DwmSetWindowAttribute(
+            hwnd_ptr,
+            DWMWA_NCRENDERING_POLICY as _,
+            &nc_policy as *const _ as *const _,
+            attr_size,
+        );
+
+        // Never round the capsule: rounding would clip an opaque base into a
+        // visible rounded rectangle around the capsule's transparent corners.
+        let corner = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd_ptr,
+            DWMWA_WINDOW_CORNER_PREFERENCE as _,
+            &corner as *const _ as *const _,
+            attr_size,
+        );
+
+        // Force the system backdrop off (Mica / Acrylic / Tabbed). This is the
+        // attribute that removes the sibling-window-dependent white/gray base.
+        let backdrop = DWMSBT_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd_ptr,
+            DWMWA_SYSTEMBACKDROP_TYPE as _,
+            &backdrop as *const _ as *const _,
+            attr_size,
+        );
+    }
+}
+
 /// Full hardening for the HUD overlay: it must never activate, never draw the
-/// system focus frame, and never show a native caption / frame (the three
-/// minimize / restore / close buttons plus the window border). Idempotent; call
-/// before *and* after every show so a missed setup pass or a style reset can
-/// never leave a visible frame.
+/// system focus frame, never show a native caption / frame (the three
+/// minimize / restore / close buttons plus the window border), and never let
+/// DWM paint an opaque system backdrop / rounded base behind it. Idempotent;
+/// call before *and* after every show so a missed setup pass or a style reset
+/// can never leave a visible frame or an opaque rectangle.
 #[cfg(target_os = "windows")]
 pub fn harden_overlay_window<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     prevent_activation(window);
     suppress_focus_frame(window);
     strip_native_frame(window);
+    clear_dwm_window_backdrop(window);
 }
 
 /// Main-window hardening: strip only the DWM focus frame. The main window must

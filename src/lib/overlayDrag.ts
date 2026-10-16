@@ -19,21 +19,30 @@ import type { OverlayStatus } from '@/shared/types'
  *   与前一次轻点相距 ≤ TAP_DISTANCE_PX → cancel-session（静默，无空录音报错），随后浏览器
  *   dblclick 调用 onDoubleClick 复位位置。正好是「点错了撤销」。
  *
- * REGRESSION WARNING（0.5.2 真机缺陷根因，勿回退）：
- * 旧设计在 **pointerdown 就发 start-session**。会话启动会让 HUD 从待机胶囊切到录音胶囊并
- * 触发 `setOverlaySize` → `set_size` + `position_overlay` 重新锚定窗口。这次**在手势进行中**
- * 发生的窗口尺寸 / 位置变化会打断指针手势（Windows/WebView2 上表现为 pointercancel 或
- * 捕获丢失），状态机在到达 8px 拖拽阈值前就被指针取消路径复位成 idle、移除全局监听并
- * cancel-session；于是后续 pointermove 再也进不了 dragging，「拖不动」，同时胶囊闪一下
- * （待机→录音→待机）。单测全绿是因为纯函数从不模拟窗口 resize。**因此 pending 阶段绝不
- * 启动会话、绝不 resize；只有手势歧义消除后（tap / hold）才发 start-session。**
+ * REGRESSION WARNING（0.5.2→0.5.3 真机缺陷根因，勿回退）——**窗口几何不可变硬不变量**：
+ * 会话启动（旧实现 pointerdown 即发 start-session；0.5.3 在 holding 阈值处发）会让 HUD 从
+ * 待机胶囊切到录音胶囊并**缩放/重锚定 overlay 窗口**（renderer `setOverlaySize` → Rust
+ * `set_size` + `position_overlay`）。这次**在指针手势进行中**发生的窗口尺寸变化会打断指针
+ * 手势（Windows/WebView2 上表现为 pointercancel / 捕获丢失）：
+ *   - 0.5.2：pending 阶段（pointerdown）就 resize → 手势在 8px 阈值前被取消 → 「拖不动」+ 闪烁。
+ *   - 0.5.3：pending 已解耦，但 **holding 阶段（500ms 阈值）仍 resize** → 按住 PTT 在 500ms
+ *     处被 pointercancel → 大胶囊闪一下骤停。
+ * 因此确立硬不变量：**窗口几何（尺寸与位置）在任何指针手势进行中（pending / holding /
+ * dragging）以及任何会话存活期间都不得改变。** 实现方式（0.5.3 定稿）：
+ *   1. **彻底放弃随状态缩放窗口**——overlay 窗口常驻 `tauri.conf.json` 的 280×64；renderer
+ *      不再调用 `setOverlaySize`（HUD 里已无任何 rAF 测量 / resize 触发路径）。所有状态的内容
+ *      尺寸（idle ≈104×36；recording/processing/success/error = 268×52）都装得下 280×64，
+ *      胶囊居中于窗口、不会被裁切。
+ *   2. 状态机**不发出任何改变窗口几何的命令**——本模块的 DragCommand 词汇里没有 resize /
+ *      重锚定命令；idle→recording 只切 DOM 分支，窗口尺寸恒定，故手势 / 会话中零几何变化。
+ * 这是「拖拽可动 + 按住不骤停」的结构性前提。任何 future 改动若重新引入「会话/手势期间
+ * 改变窗口几何」，都会原样复现上述真机缺陷。对应用例见 `overlayDrag.test.ts` 的
+ * 「window geometry invariant」组。
  *
  * latched 会话的存活性不变量：`onPointerCancel` / `onWindowBlur` / `onWatchdog` 的
  * cancel-session **只作用于「指针仍按下」的活跃 pending/holding/dragging 手势**。已松手的
  * latched 会话其 phase 恒为 idle，上述复位路径对 idle 早退，因此点其他应用、窗口失焦或看门狗
  * 都不会误杀 latch 录音。这是在每个 handler 上都必须保持的正确性点。
- *
- * 拖拽期间抑制 setOverlaySize，防止窗口跳回持久化位置；释放后恢复并 flush 测量。
  */
 
 /** 拖拽意图判定阈值（像素）。pending 期间超过此位移视为拖拽，否则视为轻点 / 按住。 */
@@ -99,7 +108,6 @@ export interface OverlayDragState {
   watchdogAt: number | null
   /** onHoldTimer 的到期时刻（pending 期间用于区分轻点与按住）。 */
   holdDeadline: number | null
-  resizeSuppressed: boolean
 }
 
 export type DragCommand =
@@ -115,8 +123,6 @@ export type DragCommand =
   | { type: 'clear-watchdog' }
   | { type: 'start-hold-timer'; deadline: number }
   | { type: 'clear-hold-timer' }
-  | { type: 'suppress-resize' }
-  | { type: 'allow-resize' }
   | { type: 'move'; pos: PhysicalPoint }
   | { type: 'flush-move' }
   | { type: 'persist-position' }
@@ -134,7 +140,6 @@ export function initialOverlayDragState(): OverlayDragState {
     lastTap: null,
     watchdogAt: null,
     holdDeadline: null,
-    resizeSuppressed: false,
   }
 }
 
@@ -196,9 +201,6 @@ export function onPointerDown(
     // still see the previous tap to perform the reset.
     watchdogAt: watchdog,
     holdDeadline,
-    // 手势期间冻结窗口尺寸：pending 不启动会话，本意已无 resize，但显式抑制可防止
-    // 任何 React 副作用在手势中途触发 setOverlaySize 而重新锚定窗口、打断指针。
-    resizeSuppressed: true,
   }
 
   return [
@@ -208,7 +210,6 @@ export function onPointerDown(
       { type: 'add-listeners' },
       { type: 'start-watchdog', deadline: watchdog },
       { type: 'start-hold-timer', deadline: holdDeadline },
-      { type: 'suppress-resize' },
     ],
   ]
 }
@@ -231,14 +232,11 @@ export function onHoldTimer(
   }
 
   // 进入按住录音：看门狗不再需要（无拖拽在途），清除以免误杀长按会话。
+  // 注意：**不发出任何窗口几何命令**——窗口常驻 280×64，录音胶囊本就在窗口内，无需 resize；
+  // 这正是「按住不骤停」的关键（见模块头 REGRESSION WARNING）。
   return [
     { ...state, phase: 'holding', holdDeadline: null, watchdogAt: null },
-    [
-      { type: 'start-session' },
-      { type: 'allow-resize' },
-      { type: 'clear-hold-timer' },
-      { type: 'clear-watchdog' },
-    ],
+    [{ type: 'start-session' }, { type: 'clear-hold-timer' }, { type: 'clear-watchdog' }],
   ]
 }
 
@@ -283,13 +281,8 @@ export function onPointerMove(
       phase: 'dragging',
       watchdogAt: deadline,
       holdDeadline: null,
-      resizeSuppressed: true,
     }
-    const cmds: DragCommand[] = [
-      { type: 'suppress-resize' },
-      { type: 'start-watchdog', deadline },
-      { type: 'clear-hold-timer' },
-    ]
+    const cmds: DragCommand[] = [{ type: 'start-watchdog', deadline }, { type: 'clear-hold-timer' }]
 
     const pos = computeDragPosition(state, event)
     if (pos) {
@@ -333,20 +326,18 @@ export function onPointerUp(
   cmds.push({ type: 'remove-listeners' }, { type: 'clear-watchdog' }, { type: 'clear-hold-timer' })
 
   if (state.phase === 'dragging') {
-    // 拖拽结束：落位、持久化、恢复 resize。会话状态（latched / lastTap）原样保留。
-    cmds.push({ type: 'flush-move' }, { type: 'persist-position' }, { type: 'allow-resize' })
+    // 拖拽结束：落位、持久化。会话状态（latched / lastTap）原样保留。
+    cmds.push({ type: 'flush-move' }, { type: 'persist-position' })
     return [endGesture(state), cmds]
   }
 
   if (state.phase === 'holding') {
     // 按住录音松开：正常停止并识别。
-    cmds.push({ type: 'stop-session' }, { type: 'allow-resize' })
+    cmds.push({ type: 'stop-session' })
     return [endGestureStopped(), cmds]
   }
 
   // pending：本次手势结束。先判双击（第 2 击复位，静默取消），再看是否停 latch，否则轻点 latch。
-  cmds.push({ type: 'allow-resize' })
-
   const prevTap = state.lastTap
   const isDoubleTap =
     prevTap !== null &&
@@ -397,7 +388,6 @@ export function onPointerCancel(
     cmds.push({ type: 'stop-session' })
   }
   // pending（尚未启动会话）与 dragging 都无需 cancel——latched 会话必须原样保留。
-  cmds.push({ type: 'allow-resize' })
   return [endGesture(state), cmds]
 }
 
@@ -421,7 +411,6 @@ export function onWatchdog(
     cmds.push({ type: 'release-pointer-capture', pointerId: state.pointerId })
   }
   cmds.push({ type: 'remove-listeners' }, { type: 'clear-watchdog' }, { type: 'clear-hold-timer' })
-  cmds.push({ type: 'allow-resize' })
   return [endGesture(state), cmds]
 }
 

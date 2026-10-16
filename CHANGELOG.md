@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.4](https://github.com/BuildWithAIs/voicekey/compare/v0.5.3...v0.5.4) (2026-10-16)
+
+### Features
+
+- **overlay:** 贴边吸附改为半隐半现抽屉式：胶囊中线停靠屏幕边缘，一半嵌入屏幕、一半外露（拖出 ≥4px 可再次吸附；重启/托盘复开保留停靠位；双击复位仍完整显示）
+
+### Bug Fixes
+
+- **overlay:** 按住说话 ≥500ms 录音胶囊闪现即停——holding 阶段启动会话仍触发手势中窗口缩放被系统取消指针；渲染层删除随状态缩放窗口机制，窗口几何在手势与会话期间恒定不变
+- **overlay:** 会话启动时的同坐标窗口重定位跳过，消除手势中最后一个指针取消插入点
+- **overlay:** 待机胶囊悬停原生 tooltip 移除（保留 aria-label 无障碍标签）
+- **overlay:** 主界面打开时胶囊下方白灰矩形残留——清除 overlay 窗口 DWM 系统背景/圆角/非客户区渲染（backdrop 采样下方内容导致仅叠自家主窗时显形）
+- **overlay:** 贴边吸附参照系由窗口外框改为胶囊可视区（修复待机胶囊吸附后离屏幕边 88px），并由渲染层传递胶囊实际尺寸
+
 ## [0.5.3](https://github.com/BuildWithAIs/voicekey/compare/v0.5.2...v0.5.3) (2026-10-16)
 
 ### Features

@@ -1,7 +1,7 @@
 {
   "name": "voice-key",
   "private": true,
-  "version": "0.5.3",
+  "version": "0.5.4",
   "productName": "芷若",
   "description": "Zhiruo (芷若) — privacy-first push-to-talk voice input for Windows, macOS, and Linux",
   "author": {

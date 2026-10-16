@@ -58,10 +58,18 @@ fn mimo_asr_credentials(config: &AppConfig) -> (String, String, String) {
 /// (i.e. above the taskbar), in logical pixels.
 const OVERLAY_BOTTOM_MARGIN: f64 = 48.0;
 
-/// Gap between the HUD capsule and the work-area edge it snaps to when the
-/// user drops a drag (`set_overlay_position`), in physical pixels (the
-/// contract unit for drag positions).
+/// Gap between the HUD window frame and the work-area edge it snaps to in the
+/// legacy window-frame snap (renderer reports no capsule size), in physical
+/// pixels (the contract unit for drag positions).
 const OVERLAY_EDGE_GAP: f64 = 10.0;
+
+/// Magnetic edge-snap threshold (`set_overlay_position`, physical px): a
+/// dropped capsule only snaps to a work-area edge when its *visible* edge is
+/// already within this distance of it. Farther away the drop is respected
+/// as-is (clamped into the work area) instead of flying to the nearest edge.
+/// Only the capsule-frame snap uses the threshold; the legacy window-frame
+/// fallback snaps unconditionally, exactly like pre-capsule builds.
+const OVERLAY_SNAP_THRESHOLD: f64 = 48.0;
 
 /// Fallback HUD size (logical px) when the window reports no size.
 /// Keep in sync with the `overlay` entry in `tauri.conf.json`.
@@ -153,9 +161,34 @@ impl OverlayFrame {
         })
     }
 
-    /// Clamp a physical position so the whole capsule stays inside the work
-    /// area (an oversized capsule degrades to anchored at the area origin).
-    fn clamp(&self, x: f64, y: f64) -> (f64, f64) {
+    /// Clamp a physical position so the capsule's **center line** stays inside
+    /// the work area. The capsule is centered in the fixed-size window, so its
+    /// center line *is* the window's center line — no capsule size needed.
+    ///
+    /// This is the clamp for edge-snapped positions and for every show /
+    /// re-anchor path: a center exactly ON the work-area edge is legal — that
+    /// is the half-hidden drawer dock (half the capsule embedded in the screen
+    /// edge) — so re-clamping never pulls a docked position back, while a
+    /// wayward center (monitor layout changed) is pulled to the nearest legal
+    /// point and the capsule can never be fully hidden.
+    fn clamp_center(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            x.clamp(
+                self.area_x - self.window_w / 2.0,
+                self.area_x + self.area_w - self.window_w / 2.0,
+            ),
+            y.clamp(
+                self.area_y - self.window_h / 2.0,
+                self.area_y + self.area_h - self.window_h / 2.0,
+            ),
+        )
+    }
+
+    /// Legacy clamp (pre-capsule window-frame snapping and the bottom-center
+    /// default): keep the whole window inside the work area, so the default /
+    /// reset placement is always fully visible. An oversized window degrades
+    /// to anchored at the area origin.
+    fn clamp_window(&self, x: f64, y: f64) -> (f64, f64) {
         (
             x.clamp(
                 self.area_x,
@@ -173,7 +206,20 @@ impl OverlayFrame {
     /// `set_position` converts logical to physical with the window's *current*
     /// scale factor (tao `set_outer_position`), so hand it logical coordinates
     /// derived from that same scale and the window lands exactly on (x, y).
+    ///
+    /// Skipped when the window is already there (sub-pixel slack: the
+    /// logical round-trip can round by <1 physical px). A same-position
+    /// `set_position` is visually a no-op but still enters the platform window
+    /// proc, and `start_session_internal` funnels every session start through
+    /// here while a pointer gesture may still be live (PTT hold / latch tap) —
+    /// 0.5.3 taught that any geometry call during a gesture is a theoretical
+    /// pointercancel insertion point, so it must not fire needlessly.
     fn apply<R: tauri::Runtime>(&self, win: &WebviewWindow<R>, x: f64, y: f64) {
+        if let Ok(pos) = win.outer_position() {
+            if (pos.x as f64 - x).abs() < 1.0 && (pos.y as f64 - y).abs() < 1.0 {
+                return;
+            }
+        }
         let _ = win.set_position(LogicalPosition::new(
             x / self.window_scale,
             y / self.window_scale,
@@ -201,15 +247,19 @@ fn position_overlay_bottom_center<R: tauri::Runtime>(app: &AppHandle<R>, win: &W
     // Vertical: `OVERLAY_BOTTOM_MARGIN` above the work-area bottom (taskbar).
     let y = frame.area_y + frame.area_h - frame.window_h - margin;
 
-    let (x, y) = frame.clamp(x, y);
+    // The default / reset placement is always fully visible (double-click
+    // reset lands here, never through the snap path).
+    let (x, y) = frame.clamp_window(x, y);
     frame.apply(win, x, y);
 }
 
 /// Place the HUD at its persisted drag position. The position is re-clamped
 /// into the work area of the monitor that owns it (monitor layouts change; the
-/// capsule must never end up off-screen) but never re-snapped or re-centered:
+/// capsule must never end up fully hidden) but never re-snapped or re-centered:
 /// this is what keeps "drag away, then resize / show" from springing back to
-/// the bottom-center default.
+/// the bottom-center default. The clamp is [`OverlayFrame::clamp_center`], so
+/// a half-hidden drawer dock (capsule center line on the work-area edge)
+/// survives re-clamping unchanged.
 fn position_overlay_persisted<R: tauri::Runtime>(
     app: &AppHandle<R>,
     win: &WebviewWindow<R>,
@@ -219,7 +269,7 @@ fn position_overlay_persisted<R: tauri::Runtime>(
     let Some(frame) = OverlayFrame::resolve(app, win, x, y) else {
         return;
     };
-    let (x, y) = frame.clamp(x, y);
+    let (x, y) = frame.clamp_center(x, y);
     frame.apply(win, x, y);
 }
 
@@ -236,38 +286,162 @@ fn position_overlay<R: tauri::Runtime>(app: &AppHandle<R>, win: &WebviewWindow<R
     }
 }
 
+/// Extract the renderer-reported capsule size (**logical** px, measured from
+/// the DOM as `offsetWidth` / `offsetHeight`) from the optional `capsule`
+/// invoke argument. Anything malformed (missing keys, non-numeric, non-finite)
+/// is ignored so the caller falls back to the legacy window-frame snap — a
+/// hostile renderer can never panic or hijack the geometry.
+fn capsule_dims(capsule: &Option<serde_json::Value>) -> Option<(f64, f64)> {
+    let obj = capsule.as_ref()?.as_object()?;
+    let width = obj.get("width")?.as_f64()?;
+    let height = obj.get("height")?.as_f64()?;
+    if width.is_finite() && height.is_finite() {
+        Some((width, height))
+    } else {
+        None
+    }
+}
+
+/// Whether a physical capsule size can define a visible frame at all: finite,
+/// positive, and able to fit inside the window. Anything else is malformed
+/// renderer input and falls back to the legacy window-frame behavior.
+fn capsule_fits(window: (f64, f64), capsule: (f64, f64)) -> bool {
+    capsule.0.is_finite()
+        && capsule.1.is_finite()
+        && capsule.0 > 0.0
+        && capsule.1 > 0.0
+        && capsule.0 <= window.0
+        && capsule.1 <= window.1
+}
+
+/// Pure snap decision for a dropped overlay position (all values physical px):
+/// picks the work-area edge and computes the snapped window position, or
+/// `None` when the drop should not snap at all.
+///
+/// - `window`: the overlay window's physical size (the capsule is centered in
+///   it, so the centering offset between the two frames is derived here).
+/// - `capsule`: the visible capsule's physical size, `None` = legacy
+///   window-frame behavior (also the fallback for malformed sizes, see
+///   [`capsule_fits`]).
+/// - `area`: work area (x, y, w, h); `x, y`: dropped window position.
+///
+/// Capsule-frame snap (the default since the capsule is what the user sees):
+/// the *capsule's* distance to each work-area edge picks the edge, and the
+/// landing is the **half-hidden drawer** position: the capsule's **center
+/// line** lands ON the work-area edge — half the capsule inside the screen,
+/// half outside. Per edge (physical px):
+/// `windowX = workLeft - capsuleOffsetX - capsuleW/2`,
+/// `windowX = workRight - capsuleOffsetX - capsuleW/2`,
+/// `windowY = workTop - capsuleOffsetY - capsuleH/2`,
+/// `windowY = workBottom - capsuleOffsetY - capsuleH/2`.
+/// Since `capsuleOffset + capsule/2 = window/2`, the docked window position is
+/// the same for every capsule size: the standby and session capsules dock on
+/// the same center line and never jump when they morph.
+/// A drop farther than [`OVERLAY_SNAP_THRESHOLD`] from every edge returns
+/// `None` (keep the drop, just clamp it).
+///
+/// Legacy window-frame snap (`capsule: None`): the dropped *point* picks the
+/// nearest edge and the *window* edge lands [`OVERLAY_EDGE_GAP`] from it,
+/// unconditionally — exactly the historical behavior.
+fn snap_overlay_position(
+    window: (f64, f64),
+    capsule: Option<(f64, f64)>,
+    area: (f64, f64, f64, f64),
+    x: f64,
+    y: f64,
+) -> Option<(f64, f64)> {
+    let (area_x, area_y, area_w, area_h) = area;
+    let capsule = capsule.filter(|(w, h)| capsule_fits(window, (*w, *h)));
+    let Some((capsule_w, capsule_h)) = capsule else {
+        // Legacy window-frame behavior: nearest work-area edge to the dropped
+        // point wins and the window edge lands OVERLAY_EDGE_GAP from it.
+        let d_left = (x - area_x).abs();
+        let d_right = (area_x + area_w - x).abs();
+        let d_top = (y - area_y).abs();
+        let d_bottom = (area_y + area_h - y).abs();
+        let nearest = d_left.min(d_right).min(d_top).min(d_bottom);
+        let (mut nx, mut ny) = (x, y);
+        if nearest == d_left {
+            nx = area_x + OVERLAY_EDGE_GAP;
+        } else if nearest == d_right {
+            nx = area_x + area_w - window.0 - OVERLAY_EDGE_GAP;
+        } else if nearest == d_top {
+            ny = area_y + OVERLAY_EDGE_GAP;
+        } else {
+            ny = area_y + area_h - window.1 - OVERLAY_EDGE_GAP;
+        }
+        return Some((nx, ny));
+    };
+
+    // Capsule-frame snap: the capsule is centered in the window, so its offset
+    // from each window edge is fixed for a given size.
+    let offset_x = (window.0 - capsule_w) / 2.0;
+    let offset_y = (window.1 - capsule_h) / 2.0;
+    let capsule_left = x + offset_x;
+    let capsule_top = y + offset_y;
+    let d_left = (capsule_left - area_x).abs();
+    let d_right = (area_x + area_w - (capsule_left + capsule_w)).abs();
+    let d_top = (capsule_top - area_y).abs();
+    let d_bottom = (area_y + area_h - (capsule_top + capsule_h)).abs();
+    let nearest = d_left.min(d_right).min(d_top).min(d_bottom);
+    // Magnetic threshold: a drop that is not already hugging an edge stays
+    // where it landed (the caller clamps it into the work area and persists).
+    if nearest > OVERLAY_SNAP_THRESHOLD {
+        return None;
+    }
+    // Half-hidden drawer landing: the capsule's center line lands ON the
+    // winning work-area edge — `window = workEdge - offset - capsule/2`
+    // (half the capsule docked into the screen edge, half left visible).
+    let (mut nx, mut ny) = (x, y);
+    if nearest == d_left {
+        nx = area_x - offset_x - capsule_w / 2.0;
+    } else if nearest == d_right {
+        nx = area_x + area_w - offset_x - capsule_w / 2.0;
+    } else if nearest == d_top {
+        ny = area_y - offset_y - capsule_h / 2.0;
+    } else {
+        ny = area_y + area_h - offset_y - capsule_h / 2.0;
+    }
+    Some((nx, ny))
+}
+
 /// Snap a dropped physical position to the nearest edge of the owning
-/// monitor's work area (the `set_overlay_position` contract): the edge nearest
-/// to the dropped point wins and the capsule ends up [`OVERLAY_EDGE_GAP`]
-/// physical pixels from it; the other axis is clamped into the work area and
-/// the result is clamped on both axes so the capsule always fits on screen.
-/// Moves the window to the snapped position and returns it (for persistence).
+/// monitor's work area and move the window there (returns the position for
+/// persistence).
+///
+/// `capsule` is the renderer-measured capsule size in **logical** px (`None`
+/// when the renderer sent nothing usable): with it, snapping happens in the
+/// capsule's frame — the *visible capsule* docks **half-hidden** with its
+/// center line on the work-area edge (drawer style), not the 280×64 window
+/// frame around it. A drop beyond [`OVERLAY_SNAP_THRESHOLD`] from every edge
+/// is not snapped: it is only clamped and persisted as-is.
 fn place_overlay_snapped<R: tauri::Runtime>(
     app: &AppHandle<R>,
     win: &WebviewWindow<R>,
     x: f64,
     y: f64,
+    capsule: Option<(f64, f64)>,
 ) -> Option<(f64, f64)> {
     let frame = OverlayFrame::resolve(app, win, x, y)?;
-
-    // Distance from the dropped point to each work-area edge (physical px).
-    let d_left = (x - frame.area_x).abs();
-    let d_right = (frame.area_x + frame.area_w - x).abs();
-    let d_top = (y - frame.area_y).abs();
-    let d_bottom = (frame.area_y + frame.area_h - y).abs();
-    let nearest = d_left.min(d_right).min(d_top).min(d_bottom);
-
-    let (mut nx, mut ny) = (x, y);
-    if nearest == d_left {
-        nx = frame.area_x + OVERLAY_EDGE_GAP;
-    } else if nearest == d_right {
-        nx = frame.area_x + frame.area_w - frame.window_w - OVERLAY_EDGE_GAP;
-    } else if nearest == d_top {
-        ny = frame.area_y + OVERLAY_EDGE_GAP;
+    // Renderer capsule dims are logical px (DOM `offsetWidth`/`offsetHeight`);
+    // the snap math is physical px, converted with the same monitor scale
+    // `OverlayFrame` uses for the window size. Malformed sizes (see
+    // `capsule_fits`) fall back to the legacy window-frame snap.
+    let window = (frame.window_w, frame.window_h);
+    let capsule_px = capsule
+        .map(|(w, h)| (w * frame.monitor_scale, h * frame.monitor_scale))
+        .filter(|(w, h)| capsule_fits(window, (*w, *h)));
+    let area = (frame.area_x, frame.area_y, frame.area_w, frame.area_h);
+    let landed = snap_overlay_position(window, capsule_px, area, x, y);
+    let (tx, ty) = landed.unwrap_or((x, y));
+    // Capsule frame: clamp by the capsule center so a half-hidden dock (center
+    // line on the work-area edge) is legal and survives untouched. Legacy
+    // fallback keeps the historical whole-window clamp.
+    let (sx, sy) = if capsule_px.is_some() {
+        frame.clamp_center(tx, ty)
     } else {
-        ny = frame.area_y + frame.area_h - frame.window_h - OVERLAY_EDGE_GAP;
-    }
-    let (sx, sy) = frame.clamp(nx, ny);
+        frame.clamp_window(tx, ty)
+    };
     frame.apply(win, sx, sy);
     Some((sx, sy))
 }
@@ -1322,28 +1496,39 @@ pub fn set_overlay_size(window: WebviewWindow, width: u32, height: u32) -> Resul
 ///
 /// Renderer contract (`src/lib/tauri-api.ts`): invoke name
 /// `set_overlay_position`, arguments `{ x, y }` in **physical pixels** taken
-/// straight from the overlay window's `outerPosition()` when the drag ends.
-/// Passing `null` for either coordinate is the reset path: the persisted
-/// position is cleared and the capsule returns to the bottom-center default.
+/// straight from the overlay window's `outerPosition()` when the drag ends,
+/// plus an optional `capsule: { width, height }` in **logical** px — the
+/// visible capsule's measured DOM size. Passing `null` for either coordinate
+/// is the reset path: the persisted position is cleared and the capsule
+/// returns to the bottom-center default.
 ///
 /// The dropped position is snapped to the nearest edge of the owning
-/// monitor's work area ([`OVERLAY_EDGE_GAP`] physical px gap; multi-monitor
-/// and DPI safe), clamped into that work area, applied to the window and
-/// persisted to `app.overlayPosition`.
+/// monitor's work area, clamped into that work area, applied to the window and
+/// persisted to `app.overlayPosition`. With `capsule`, snapping docks the
+/// capsule **half-hidden** (drawer style: its center line lands on the
+/// work-area edge — half embedded in the screen edge, half visible; see
+/// [`snap_overlay_position`]); without it (legacy / malformed) the window
+/// frame snaps [`OVERLAY_EDGE_GAP`] from the edge as before. A drop beyond
+/// [`OVERLAY_SNAP_THRESHOLD`] is not snapped — only clamped (by the capsule
+/// center, so a half-hidden position is legal) and persisted where it landed.
 #[tauri::command]
 pub fn set_overlay_position(
     window: WebviewWindow,
     x: Option<f64>,
     y: Option<f64>,
+    capsule: Option<serde_json::Value>,
 ) -> Result<(), String> {
     let app = window.app_handle();
     let win = app
         .get_webview_window(crate::windowing::OVERLAY_WINDOW_LABEL)
         .ok_or_else(|| "Overlay window is unavailable".to_string())?;
     let state = app.state::<AppState>();
+    // Malformed capsule data is silently ignored (legacy window-frame snap);
+    // it must never fail the command or panic.
+    let capsule = capsule_dims(&capsule);
     match (x, y) {
         (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
-            let (sx, sy) = place_overlay_snapped(app, &win, x, y)
+            let (sx, sy) = place_overlay_snapped(app, &win, x, y, capsule)
                 .ok_or_else(|| "Unable to resolve the target monitor".to_string())?;
             state.config.merge(&serde_json::json!({
                 "app": { "overlayPosition": { "x": sx, "y": sy } }
@@ -1415,5 +1600,266 @@ mod tests {
     fn session_with_audio_is_never_quieted_by_duration() {
         assert!(!empty_session_is_quiet(0, true));
         assert!(!empty_session_is_quiet(5_000, true));
+    }
+
+    // ---- capsule-frame edge snapping -------------------------------------
+    //
+    // Fixed geometry for every snap test: window 280×64, work area
+    // (100, 50, 1920, 1040) so the work-area origin is *not* (0, 0).
+
+    const WINDOW: (f64, f64) = (280.0, 64.0);
+    const AREA: (f64, f64, f64, f64) = (100.0, 50.0, 1920.0, 1040.0);
+    const IDLE_CAPSULE: (f64, f64) = (104.0, 36.0); // standby capsule
+    const SESSION_CAPSULE: (f64, f64) = (268.0, 52.0); // recording / processing capsule
+
+    /// Capsule center line must land ON the work-area edge it docked to
+    /// (≤ 2 physical px — half-hidden drawer landing, rounding slack only).
+    /// The dock therefore always shows exactly half the capsule.
+    fn assert_center_on_edge(
+        window: (f64, f64),
+        capsule: (f64, f64),
+        snapped: (f64, f64),
+        edge: &str,
+    ) {
+        let offset_x = (window.0 - capsule.0) / 2.0;
+        let offset_y = (window.1 - capsule.1) / 2.0;
+        let center_x = snapped.0 + offset_x + capsule.0 / 2.0;
+        let center_y = snapped.1 + offset_y + capsule.1 / 2.0;
+        let distance = match edge {
+            "left" => (center_x - AREA.0).abs(),
+            "right" => (center_x - (AREA.0 + AREA.2)).abs(),
+            "top" => (center_y - AREA.1).abs(),
+            _ => (center_y - (AREA.1 + AREA.3)).abs(),
+        };
+        assert!(
+            distance <= 2.0,
+            "{edge} dock: capsule center line {distance} px from the work-area edge"
+        );
+    }
+
+    /// Standby capsule (104×36) docks half-hidden on all four work-area edges:
+    /// center line on the edge, capsule half outside the work area.
+    #[test]
+    fn idle_capsule_docks_half_hidden_on_every_edge() {
+        // Drop positions are window coordinates whose *capsule* already hovers
+        // near the target edge (inside the magnetic threshold).
+        let left = snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 20.0, 500.0).unwrap();
+        assert_center_on_edge(WINDOW, IDLE_CAPSULE, left, "left");
+        // Half-hidden: the capsule straddles the work-area edge.
+        let capsule_left = left.0 + (WINDOW.0 - IDLE_CAPSULE.0) / 2.0;
+        assert!(capsule_left < AREA.0 && capsule_left + IDLE_CAPSULE.0 > AREA.0);
+        let right = snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 1840.0, 500.0).unwrap();
+        assert_center_on_edge(WINDOW, IDLE_CAPSULE, right, "right");
+        let top = snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 900.0, 60.0).unwrap();
+        assert_center_on_edge(WINDOW, IDLE_CAPSULE, top, "top");
+        let capsule_top = top.1 + (WINDOW.1 - IDLE_CAPSULE.1) / 2.0;
+        assert!(capsule_top < AREA.1 && capsule_top + IDLE_CAPSULE.1 > AREA.1);
+        let bottom =
+            snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 900.0, 1010.0).unwrap();
+        assert_center_on_edge(WINDOW, IDLE_CAPSULE, bottom, "bottom");
+    }
+
+    /// Session capsule (268×52) docks half-hidden on all four work-area edges.
+    #[test]
+    fn session_capsule_docks_half_hidden_on_every_edge() {
+        let left =
+            snap_overlay_position(WINDOW, Some(SESSION_CAPSULE), AREA, 108.0, 500.0).unwrap();
+        assert_center_on_edge(WINDOW, SESSION_CAPSULE, left, "left");
+        let right =
+            snap_overlay_position(WINDOW, Some(SESSION_CAPSULE), AREA, 1760.0, 500.0).unwrap();
+        assert_center_on_edge(WINDOW, SESSION_CAPSULE, right, "right");
+        let top = snap_overlay_position(WINDOW, Some(SESSION_CAPSULE), AREA, 900.0, 60.0).unwrap();
+        assert_center_on_edge(WINDOW, SESSION_CAPSULE, top, "top");
+        let bottom =
+            snap_overlay_position(WINDOW, Some(SESSION_CAPSULE), AREA, 900.0, 1030.0).unwrap();
+        assert_center_on_edge(WINDOW, SESSION_CAPSULE, bottom, "bottom");
+    }
+
+    /// Snapping only anchors the winning edge; the other axis is preserved.
+    /// Both capsule states share one docked window position, so the capsule
+    /// never jumps when it morphs between states.
+    #[test]
+    fn snap_only_moves_the_winning_axis() {
+        let left = snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 20.0, 500.0).unwrap();
+        assert!((left.1 - 500.0).abs() <= 2.0);
+        // Formula contract: windowX = workLeft - capsuleOffsetX - capsuleW/2
+        // (= workLeft - windowW/2, independent of capsule size).
+        let expected_x = AREA.0 - (WINDOW.0 - IDLE_CAPSULE.0) / 2.0 - IDLE_CAPSULE.0 / 2.0;
+        assert!((left.0 - expected_x).abs() <= 2.0);
+        let left_session =
+            snap_overlay_position(WINDOW, Some(SESSION_CAPSULE), AREA, 108.0, 500.0).unwrap();
+        assert!(
+            (left_session.0 - left.0).abs() <= 2.0,
+            "both states share the dock"
+        );
+    }
+
+    /// Beyond [`OVERLAY_SNAP_THRESHOLD`] from every edge: no snap at all —
+    /// the caller keeps the drop (clamped). At the threshold it still snaps.
+    #[test]
+    fn drop_beyond_snap_threshold_does_not_snap() {
+        // Capsule edge 50 px from the left edge (> 48): must not snap.
+        assert_eq!(
+            snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 62.0, 500.0),
+            None
+        );
+        // Dead center: nearest edge is hundreds of px away.
+        assert_eq!(
+            snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 900.0, 500.0),
+            None
+        );
+        // Exactly at the threshold (48 px) still snaps.
+        let snapped = snap_overlay_position(WINDOW, Some(IDLE_CAPSULE), AREA, 60.0, 500.0).unwrap();
+        assert_center_on_edge(WINDOW, IDLE_CAPSULE, snapped, "left");
+    }
+
+    /// No capsule parameter falls back to the historical window-frame
+    /// behavior: dropped *point* picks the nearest edge, window edge lands
+    /// [`OVERLAY_EDGE_GAP`] from it, unconditionally.
+    #[test]
+    fn without_capsule_falls_back_to_window_frame_behavior() {
+        // Left: drop point 70 px from the work-area left → window at +10 px.
+        assert_eq!(
+            snap_overlay_position(WINDOW, None, AREA, 30.0, 500.0),
+            Some((AREA.0 + OVERLAY_EDGE_GAP, 500.0))
+        );
+        // Right: drop point 20 px from the work-area right edge.
+        assert_eq!(
+            snap_overlay_position(WINDOW, None, AREA, 2000.0, 500.0),
+            Some((AREA.0 + AREA.2 - WINDOW.0 - OVERLAY_EDGE_GAP, 500.0))
+        );
+        // Unconditional: far from every edge it still snaps to the nearest
+        // one (no magnetic threshold in the legacy path).
+        assert!(snap_overlay_position(WINDOW, None, AREA, 900.0, 500.0).is_some());
+    }
+
+    /// A degenerate or larger-than-window capsule is malformed input: it
+    /// cannot define a visible frame, so the legacy snap takes over.
+    #[test]
+    fn malformed_capsule_sizes_fall_back_to_window_frame() {
+        let legacy = snap_overlay_position(WINDOW, None, AREA, 30.0, 500.0);
+        for bad in [
+            (0.0, 36.0),
+            (-104.0, 36.0),
+            (104.0, 0.0),
+            (300.0, 36.0),  // wider than the window
+            (104.0, 128.0), // taller than the window
+            (f64::NAN, 36.0),
+            (104.0, f64::INFINITY),
+        ] {
+            assert_eq!(
+                snap_overlay_position(WINDOW, Some(bad), AREA, 30.0, 500.0),
+                legacy,
+                "capsule {bad:?} must fall back to the window-frame snap"
+            );
+        }
+    }
+
+    /// Re-clamping a half-hidden dock (show / re-anchor path) must be a no-op:
+    /// the capsule center line on the work-area edge is a legal position, so
+    /// re-clamping may never pull it back.
+    #[test]
+    fn snapped_position_survives_reclamp() {
+        let frame = OverlayFrame {
+            area_x: AREA.0,
+            area_y: AREA.1,
+            area_w: AREA.2,
+            area_h: AREA.3,
+            window_w: WINDOW.0,
+            window_h: WINDOW.1,
+            monitor_scale: 1.0,
+            window_scale: 1.0,
+        };
+        // Derive each drop from the desired dock instead of hand-picking
+        // points shared by both capsules: the target-edge capsule side sits
+        // DROP_INSET px *inside* the work-area edge, so the drop is always
+        // within OVERLAY_SNAP_THRESHOLD (48) for every capsule size. A single
+        // shared drop can snap for one capsule yet exceed the threshold for
+        // the other (e.g. the left drop (20, 500) puts the session capsule's
+        // left side 74 px from the work-area left — beyond 48 — so it legally
+        // returns None while the standby capsule snaps).
+        const DROP_INSET: f64 = 8.0;
+        for edge in ["left", "right", "top", "bottom"] {
+            for capsule in [IDLE_CAPSULE, SESSION_CAPSULE] {
+                let offset_x = (WINDOW.0 - capsule.0) / 2.0;
+                let offset_y = (WINDOW.1 - capsule.1) / 2.0;
+                // Capsule side = target work-area edge ± DROP_INSET.
+                let drop = match edge {
+                    "left" => (AREA.0 + DROP_INSET - offset_x, 500.0),
+                    "right" => (AREA.0 + AREA.2 - DROP_INSET - offset_x - capsule.0, 500.0),
+                    "top" => (900.0, AREA.1 + DROP_INSET - offset_y),
+                    _ => (900.0, AREA.1 + AREA.3 - DROP_INSET - offset_y - capsule.1),
+                };
+                let snapped =
+                    snap_overlay_position(WINDOW, Some(capsule), AREA, drop.0, drop.1).unwrap();
+                assert_eq!(
+                    frame.clamp_center(snapped.0, snapped.1),
+                    snapped,
+                    "{edge} dock ({capsule:?}) must survive the show-path re-clamp"
+                );
+            }
+        }
+    }
+
+    /// Center-based clamp: any position whose *center* is inside the work area
+    /// (including half-hidden hugging positions) is left alone; only a center
+    /// outside the work area is pulled to the nearest edge — and never further,
+    /// so the capsule is never fully hidden.
+    #[test]
+    fn clamp_center_keeps_near_edge_and_pulls_wayward_centers() {
+        let frame = OverlayFrame {
+            area_x: AREA.0,
+            area_y: AREA.1,
+            area_w: AREA.2,
+            area_h: AREA.3,
+            window_w: WINDOW.0,
+            window_h: WINDOW.1,
+            monitor_scale: 1.0,
+            window_scale: 1.0,
+        };
+        // Half-hidden dock (center on the edge): unchanged.
+        let docked_x = AREA.0 - WINDOW.0 / 2.0;
+        assert_eq!(frame.clamp_center(docked_x, 500.0), (docked_x, 500.0));
+        // Center slightly inside (window half outside the work area): unchanged.
+        assert_eq!(
+            frame.clamp_center(docked_x + 10.0, 500.0),
+            (docked_x + 10.0, 500.0)
+        );
+        // Center outside the work area: pulled exactly onto the edge.
+        assert_eq!(
+            frame.clamp_center(docked_x - 30.0, 500.0),
+            (docked_x, 500.0)
+        );
+        // Same on the vertical axis.
+        let docked_y = AREA.1 + AREA.3 - WINDOW.1 / 2.0;
+        assert_eq!(
+            frame.clamp_center(900.0, docked_y + 30.0),
+            (900.0, docked_y)
+        );
+        assert_eq!(
+            frame.clamp_center(900.0, docked_y - 10.0),
+            (900.0, docked_y - 10.0)
+        );
+    }
+
+    /// The optional `capsule` argument is parsed defensively: malformed JSON
+    /// shapes are ignored (→ legacy snap) and never error or panic.
+    #[test]
+    fn capsule_dims_ignores_malformed_arguments() {
+        assert_eq!(
+            capsule_dims(&Some(serde_json::json!({ "width": 104, "height": 36 }))),
+            Some((104.0, 36.0))
+        );
+        assert_eq!(capsule_dims(&None), None);
+        assert_eq!(capsule_dims(&Some(serde_json::json!(null))), None);
+        assert_eq!(capsule_dims(&Some(serde_json::json!("wide"))), None);
+        assert_eq!(
+            capsule_dims(&Some(serde_json::json!({ "width": 104 }))),
+            None
+        );
+        assert_eq!(
+            capsule_dims(&Some(serde_json::json!({ "width": "104", "height": 36 }))),
+            None
+        );
     }
 }

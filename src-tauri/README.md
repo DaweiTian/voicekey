@@ -20,11 +20,20 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `SWP_FRAMECHANGED` 提交——tao 给每个窗口都带这些位、只靠收起非客户区隐藏，一旦存在
   非客户区 Windows 就会画原生标题栏（最小化/还原/关闭三键）；overlay 另在
   `tauri.conf.json` 用 `"shadow": false` 消除该非客户区（默认 `shadow: true` 会给无装饰
-  窗口加 DWM 边框/阴影/圆角），此处样式剥离作二次兜底；main：仅去 DWM 焦点框，
+  窗口加 DWM 边框/阴影/圆角），此处样式剥离作二次兜底；overlay 另调
+  `clear_dwm_window_backdrop` 用 `DWMWA_NCRENDERING_POLICY=DWMNCRP_DISABLED`、
+  `DWMWA_WINDOW_CORNER_PREFERENCE=DWMWCP_DONOTROUND`、`DWMWA_SYSTEMBACKDROP_TYPE=DWMSBT_NONE`
+  清掉 DWM 自绘的不透明底——Win11 默认 `DWMSBT_AUTO` 会给无边框置顶 `WS_POPUP` 胶囊
+  自动套一层次生 Acrylic 背板，而背板是"采样其下层"的，故胶囊叠在自家浅色主窗口上才
+  显白/灰矩形（叠桌面/他应用无此采样）；main：仅去 DWM 焦点框，
   **不加** `WS_EX_NOACTIVATE`，保留应用自绘 CSS 边框）。**回归警示**：
   `DWMWA_COLOR_NONE` 必须使用 windows-sys 导出的常量（= `0xFFFF_FFFE`，MSDN
   DWMWINDOWATTRIBUTE）；早前手写错误字面量 `0x0100_0000` 被 DWM 当作 COLORREF，
-  边框被染成近黑色而非去除，令整项修复静默失效。主窗口隐藏到托盘后延迟 5 分
+  边框被染成近黑色而非去除，令整项修复静默失效。**另注**：`DWMWA_*` 属性只需已启用的
+  `Win32_Graphics_Dwm` feature；**不复用** tao 建窗时的 `DwmEnableBlurBehindWindow`
+  空区域透明（`DWM_BLURBEHIND`/`CreateRectRgn` 需 `Win32_Graphics_Gdi`，当前未启用）；
+  `tauri.conf.json` 的 `noRedirectionBitmap` 在本版 Tauri 是**死配置**
+  （tauri-runtime-wry 从未调用 tao 的 `with_no_redirection_bitmap`），不要依赖。主窗口隐藏到托盘后延迟 5 分
   钟 `destroy()` 整个 main WebView 进程，5 分钟内重开则通过 generation 计数取消销毁；
   `ensure_main_window` 幂等重建（label 仍为 `"main"`，尺寸/位置/decorations 与
   `tauri.conf.json` 的 main 条目一致），`open_main_window` 为所有打开路径（托盘
@@ -58,11 +67,29 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `{ width, height }`，逻辑像素）把 overlay `set_size` 为夹取后的尺寸
   （40..=400 × 32..=120）并经 `position_overlay` 保持持久化位置/底部居中。
   `set_overlay_position` 命令（渲染层契约：invoke 名 `set_overlay_position`、参数
-  `x: f64 | null, y: f64 | null`，**物理像素**、直接来自窗口 `outerPosition()`）：
-  拖拽落点吸附到所属显示器工作区最近的边（左/右/上/下，间隙 10 物理像素）、钳制进
-  工作区后移动窗口并持久化到 `app.overlayPosition: {x, y}`（多显示器/DPI 安全，与
-  `position_overlay_bottom_center` 同一套物理像素换算）；传 `null`（任一坐标）则清除
-  持久化并回到底部居中默认位。`start_session_internal` 是 PTT / 中键 / HUD pointerdown 三路的统一
+  `x: f64 | null, y: f64 | null`，**物理像素**、直接来自窗口 `outerPosition()`，可选
+  `capsule: { width, height }` 为可见胶囊实际尺寸、**逻辑像素**（DOM
+  `offsetWidth/offsetHeight`））：拖拽落点按**胶囊可视区**吸附到所属显示器工作区最近的
+  边（左/右/上/下），落点为**半隐半现（抽屉式）**——胶囊**中线**压在工作区边界线上，
+  一半嵌进屏幕边、一半露出（`windowX = workLeft - capsuleOffsetX - capsuleW/2`，其余
+  三向同理；因 `capsuleOffset + capsule/2 = window/2`，落点与胶囊尺寸无关，待机/会话
+  两态胶囊共用同一中线、形变不跳位）。磁性阈值
+  `OVERLAY_SNAP_THRESHOLD = 48` 物理像素：胶囊边距所有工作区边都超过阈值则**不吸附**，
+  仅钳制（按胶囊中心）并按原地持久化。无 `capsule`（或 malformed——非数值 / 非有限 /
+  超出窗口尺寸，静默忽略）时回退旧的窗口外框吸附（间隙 10 物理像素、无阈值、整窗
+  钳制，行为不变）。吸附落点计算
+  抽成纯函数 `snap_overlay_position`（窗口尺寸/胶囊尺寸/候选位置/work area → 吸附后
+  窗口位置或 `None`），单测覆盖两态胶囊四边中线贴边 ≤2px（半隐）、超阈值不吸附、回退
+  旧行为、malformed 校验与半隐坐标再钳制存活。落点钳制后移动窗口并持久化到
+  `app.overlayPosition: {x, y}`（多显示器/DPI 安全，与 `position_overlay_bottom_center`
+  同一套物理像素换算；钳制语义为**胶囊中心线**留在工作区内——中线贴边即半隐停靠位、
+  合法，show/托盘复开/重启重锚定绝不回退半隐坐标，中心出界才拉回且至少露出半胶囊）；
+  传 `null`（任一坐标）则清除持久化并回到底部居中默认位（默认/复位位走整窗钳制、
+  **完整显示**，不经过吸附）。
+  `OverlayFrame::apply` 在目标坐标与 `outer_position` 相同（±1 物理像素）时跳过
+  `set_position`：同坐标 SetWindowPos 无视觉效果但会进入窗口过程，而
+  `start_session_internal` 每次启动会话都途经此处且彼时可能仍有指针手势在途
+  （0.5.3 的 pointercancel 教训），故不得空放。`start_session_internal` 是 PTT / 中键 / HUD pointerdown 三路的统一
   入口：仅 Idle / Completed / Error 可启动，Recording / Processing 一律拒绝并安静
   失败（防止转写/润色的 Processing 窗口内按 PTT 顶掉在途会话造成孤儿录音）；
   启动 / 停止 / 取消 / 出错路径都会清掉 mouse.rs 的中键会话 token。启动时同时

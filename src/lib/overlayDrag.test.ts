@@ -81,7 +81,6 @@ describe('onPointerDown', () => {
     expect(hasCmd(cmds, 'add-listeners')).toBe(true)
     expect(hasCmd(cmds, 'start-watchdog')).toBe(true)
     expect(hasCmd(cmds, 'start-hold-timer')).toBe(true)
-    expect(hasCmd(cmds, 'suppress-resize')).toBe(true)
     expect(state.holdDeadline).toBe(HOLD_LATCH_MAX_MS)
   })
 
@@ -120,8 +119,10 @@ describe('hold timer resolves pending into PTT', () => {
     const [nextState, cmds] = onHoldTimer(state, HOLD_LATCH_MAX_MS)
     expect(nextState.phase).toBe('holding')
     expect(hasCmd(cmds, 'start-session')).toBe(true)
-    expect(hasCmd(cmds, 'allow-resize')).toBe(true)
     expect(hasCmd(cmds, 'clear-watchdog')).toBe(true)
+    // Hard invariant: entering PTT must not emit any window-geometry command.
+    expect(hasCmd(cmds, 'set-overlay-position')).toBe(false)
+    expect(hasCmd(cmds, 'move')).toBe(false)
   })
 
   it('does nothing before the deadline', () => {
@@ -210,12 +211,10 @@ describe('pending → dragging', () => {
       10,
     )
     expect(nextState.phase).toBe('dragging')
-    expect(nextState.resizeSuppressed).toBe(true)
     // REGRESSION LOCK: dragging must not touch the session (the old design
     // cancelled a session that pointerdown had wrongly started).
     expect(hasCmd(cmds, 'cancel-session')).toBe(false)
     expect(hasCmd(cmds, 'start-session')).toBe(false)
-    expect(hasCmd(cmds, 'suppress-resize')).toBe(true)
     expect(hasCmd(cmds, 'clear-hold-timer')).toBe(true)
   })
 
@@ -238,7 +237,7 @@ describe('pending → dragging', () => {
     expect(moveCmdPos(cmds)).toEqual({ x: 1015, y: 530 })
   })
 
-  it('persists position, allows resize and keeps latched on drag release', () => {
+  it('persists position and keeps latched on drag release', () => {
     let state: OverlayDragState = { ...initialOverlayDragState(), latched: true }
     ;[state] = onPointerDown(downEvent(1, { x: 100, y: 100 }), state, 0, 'recording')
     state = setWinStart(state, { x: 1000, y: 500 }, 1.0)
@@ -246,11 +245,9 @@ describe('pending → dragging', () => {
     expect(state.phase).toBe('dragging')
     const [nextState, cmds] = onPointerUp(upEvent(1, { x: 110, y: 110 }), state, 20)
     expect(nextState.phase).toBe('idle')
-    expect(nextState.resizeSuppressed).toBe(false)
     // Dragging a latched recording only moves the window; recording continues.
     expect(nextState.latched).toBe(true)
     expect(cmdTypes(cmds)).toContain('flush-move')
-    expect(cmdTypes(cmds)).toContain('allow-resize')
     expect(cmdTypes(cmds)).toContain('persist-position')
     expect(cmdTypes(cmds)).toContain('remove-listeners')
     expect(hasCmd(cmds, 'stop-session')).toBe(false)
@@ -291,15 +288,15 @@ describe('reset paths must always return to idle', () => {
     expect(hasCmd(cmds, 'stop-session')).toBe(false)
   })
 
-  it('pointercancel while dragging only restores resize (keeps latched)', () => {
+  it('pointercancel while dragging resets to idle (keeps latched)', () => {
     let state: OverlayDragState = { ...initialOverlayDragState(), latched: true }
     ;[state] = onPointerDown(downEvent(1), state, 0, 'recording')
     ;[state] = onPointerMove(moveEvent(1, { x: 200, y: 200 }), state, 10)
     const [nextState, cmds] = onPointerCancel({ pointerId: 1 }, state, 20)
     expect(nextState.phase).toBe('idle')
     expect(nextState.latched).toBe(true)
-    expect(hasCmd(cmds, 'allow-resize')).toBe(true)
     expect(hasCmd(cmds, 'cancel-session')).toBe(false)
+    expect(hasCmd(cmds, 'remove-listeners')).toBe(true)
   })
 
   it('pointercancel while holding stops the PTT so audio is transcribed, not discarded', () => {
@@ -319,7 +316,7 @@ describe('reset paths must always return to idle', () => {
     expect(nextState.phase).toBe('idle')
     expect(nextState.latched).toBe(true)
     expect(hasCmd(cmds, 'cancel-session')).toBe(false)
-    expect(hasCmd(cmds, 'allow-resize')).toBe(true)
+    expect(hasCmd(cmds, 'stop-session')).toBe(false)
   })
 
   it('window blur is a no-op for a latched recording (phase idle)', () => {
@@ -337,8 +334,8 @@ describe('reset paths must always return to idle', () => {
     const [nextState, cmds] = onWatchdog(state, 1001)
     expect(nextState.phase).toBe('idle')
     expect(hasCmd(cmds, 'cancel-session')).toBe(false)
-    expect(hasCmd(cmds, 'allow-resize')).toBe(true)
     expect(hasCmd(cmds, 'clear-watchdog')).toBe(true)
+    expect(hasCmd(cmds, 'remove-listeners')).toBe(true)
   })
 
   it('watchdog never touches a latched (idle) state', () => {
@@ -459,5 +456,61 @@ describe('hold-to-talk still begins with a gesture, not on pointerdown', () => {
     const [held, holdCmds] = onHoldTimer(afterDown, 500 + HOLD_LATCH_MAX_MS)
     expect(held.phase).toBe('holding')
     expect(hasCmd(holdCmds, 'start-session')).toBe(true)
+  })
+})
+
+// HARD INVARIANT (0.5.3): the state machine must never emit a command that changes
+// window geometry, because an in-gesture window resize/re-anchor is what broke drag
+// (0.5.2) and hold-to-talk (0.5.3) on real hardware. The overlay window is a fixed
+// 280x64 and the capsule only swaps DOM branches; nothing here may resize or move
+// the window during a gesture or a live session. The only legitimately
+// geometry-moving commands are 'move'/'flush-move'/'persist-position' (self-drag,
+// live) and 'set-overlay-position' (double-click reset, only after a gesture ends).
+describe('window geometry invariant', () => {
+  // Every command that is NOT a window-geometry change.
+  const NON_GEOMETRY_COMMANDS = new Set<string>([
+    'start-session',
+    'stop-session',
+    'cancel-session',
+    'capture-pointer',
+    'release-pointer-capture',
+    'add-listeners',
+    'remove-listeners',
+    'start-watchdog',
+    'clear-watchdog',
+    'start-hold-timer',
+    'clear-hold-timer',
+  ])
+  // Self-drag position updates are allowed; they must never appear in a PTT gesture.
+  const DRAG_ONLY_COMMANDS = new Set<string>(['move', 'flush-move', 'persist-position'])
+
+  it('emits no geometry command while entering PTT (holding)', () => {
+    const [down, downCmds] = onPointerDown(downEvent(1), initialOverlayDragState(), 0, 'idle')
+    const [, holdCmds] = onHoldTimer(down, HOLD_LATCH_MAX_MS)
+    for (const type of cmdTypes([...downCmds, ...holdCmds])) {
+      expect(NON_GEOMETRY_COMMANDS.has(type)).toBe(true)
+    }
+  })
+
+  it('a full hold gesture never resizes or re-anchors the window', () => {
+    const [down, downCmds] = onPointerDown(downEvent(1), initialOverlayDragState(), 0, 'idle')
+    const [held, holdCmds] = onHoldTimer(down, HOLD_LATCH_MAX_MS)
+    const [, upCmds] = onPointerUp(upEvent(1), held, HOLD_LATCH_MAX_MS + 2000)
+    for (const type of cmdTypes([...downCmds, ...holdCmds, ...upCmds])) {
+      expect(NON_GEOMETRY_COMMANDS.has(type)).toBe(true)
+    }
+  })
+
+  it('a full drag gesture only moves the window, never resizes it', () => {
+    const [down, downCmds] = onPointerDown(downEvent(1), initialOverlayDragState(), 0, 'idle')
+    const [dragging, moveCmds] = onPointerMove(
+      moveEvent(1, { x: 100 + DRAG_THRESHOLD_PX + 30, y: 130 }),
+      down,
+      10,
+    )
+    const [, upCmds] = onPointerUp(upEvent(1, { x: 140, y: 130 }), dragging, 20)
+    for (const type of cmdTypes([...downCmds, ...moveCmds, ...upCmds])) {
+      expect(NON_GEOMETRY_COMMANDS.has(type) || DRAG_ONLY_COMMANDS.has(type)).toBe(true)
+    }
   })
 })

@@ -30,9 +30,6 @@ import {
 } from '../lib/overlayDrag'
 import { Waveform } from './Waveform'
 
-/** 窗口缩放到胶囊内容尺寸时的内边距（每侧 2px）。 */
-const OVERLAY_PADDING_PX = 2
-
 /**
  * 各处理阶段的小面积语义色：只作用于转圈描边与阶段图标，
  * 胶囊底色在所有状态下保持统一的深色玻璃。
@@ -162,14 +159,16 @@ export function HUD() {
   /** 与 overlayState 同步，但可在事件回调里同步读取（避免闭包过期）。 */
   const statusRef = useRef<OverlayStatus>('idle')
   /**
-   * 内容测量容器 ref：容器自身无 transform，其 rect 恒等于胶囊布局尺寸，
-   * 不受入场 / 按压缩放动画影响，供窗口缩放（setOverlaySize）使用。
+   * 根容器 ref：与 pointerdown 的 `setPointerCapture` 同一个元素，供 releasePointerCapture
+   * 对称释放。窗口尺寸常驻不变（见下），已无「内容测量容器」（无 resize 测量回路）。
    */
-  const measureRef = useRef<HTMLDivElement | null>(null)
-  /** 测量用 rAF：同一帧内多次重渲染只测一次。 */
-  const measureRafRef = useRef<number | null>(null)
-  /** 上次已下发的窗口尺寸，尺寸未变不重复 invoke（录音电平帧高频重渲染）。 */
-  const lastOverlaySizeRef = useRef<{ width: number; height: number } | null>(null)
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  /**
+   * 胶囊布局盒 ref（包住当前状态胶囊的 shrink-wrap 容器）。仅在拖拽松手时做**一次性只读**
+   * offsetWidth/offsetHeight 测量，把可见胶囊实际尺寸带给 Rust 做「胶囊贴边」吸附；
+   * 不参与任何 resize / 重绘回路，也不在手势中触发几何变化。
+   */
+  const capsuleBoxRef = useRef<HTMLDivElement | null>(null)
 
   /** 当前 Tauri overlay 窗口句柄（缓存以避免重复创建）。 */
   const windowRef = useRef<TauriWindow | null>(null)
@@ -225,9 +224,6 @@ export function HUD() {
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current)
       }
-      if (measureRafRef.current !== null) {
-        cancelAnimationFrame(measureRafRef.current)
-      }
       removeDragListeners()
       clearWatchdog()
       clearHoldTimer()
@@ -266,10 +262,12 @@ export function HUD() {
       latchedRef.current = false
       dragRef.current = { ...dragRef.current, latched: false, startedLatched: false }
     }
-    // 窗口已缩到内容大小（见 scheduleOverlayResize），整窗即胶囊、无死区，所有
-    // 状态保持可点击（待机 = 按住说话 / 拖拽，录音 / 处理 = 取消按钮）。不做 hover 穿透：
-    // Tauri `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，一旦
-    // 穿透 mouseenter 不再可达，胶囊（含取消按钮）会永久点不到。
+    // 窗口常驻 tauri.conf.json 的 280×64（任何状态都装得下），不再随状态缩放——这是
+    // 「手势 / 会话期间窗口几何不可变」硬不变量的实现基础（见 overlayDrag.ts 模块头
+    // REGRESSION WARNING）。整窗即胶囊热区、无死区，所有状态保持可点击（待机 = 点按切换 /
+    // 按住说话 / 拖拽，录音 / 处理 = 取消按钮）。不做 hover 穿透：Tauri
+    // `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，一旦穿透
+    // mouseenter 不再可达，胶囊（含取消按钮）会永久点不到。
     window.electronAPI.setIgnoreMouseEvents(false)
   }, [overlayState.status])
 
@@ -292,39 +290,6 @@ export function HUD() {
     }, 1000)
     return () => clearInterval(id)
   }, [])
-
-  /**
-   * 状态 / 文案变化后测量胶囊实际内容尺寸，把 overlay 窗口缩到内容大小
-   * （每侧 2px 内边距；Rust `set_overlay_size` 钳制尺寸合法性）。
-   * 在 rAF 中取 `getBoundingClientRect` 等布局落定；测量容器自身无 transform，
-   * 故 rect 不受入场 / 按压缩放动画干扰。尺寸不变则去重、不重复 invoke。
-   * 拖拽期间抑制调用，避免 set_overlay_size 用持久化位置重新锚定导致窗口跳回旧点。
-   */
-  const scheduleOverlayResize = useCallback(() => {
-    if (dragRef.current.resizeSuppressed) return
-    if (measureRafRef.current !== null) return
-    measureRafRef.current = requestAnimationFrame(() => {
-      measureRafRef.current = null
-      const el = measureRef.current
-      if (!el) return
-      const rect = el.getBoundingClientRect()
-      const width = Math.ceil(rect.width) + OVERLAY_PADDING_PX * 2
-      const height = Math.ceil(rect.height) + OVERLAY_PADDING_PX * 2
-      if (width <= 0 || height <= 0) return
-      const last = lastOverlaySizeRef.current
-      if (last && last.width === width && last.height === height) return
-      lastOverlaySizeRef.current = { width, height }
-      window.electronAPI.setOverlaySize(width, height).catch(() => {
-        // 下发失败：清掉去重缓存，下次渲染重试
-        lastOverlaySizeRef.current = null
-      })
-    })
-  }, [])
-
-  // 每次渲染后测量并按需缩放：覆盖状态切换与文案长度变化（如 success 预览变长）。
-  useEffect(() => {
-    scheduleOverlayResize()
-  })
 
   /**
    * 启动会话（start-session 命令）。轻点 latch 与按住 PTT 都经此；会话结束由 stop/cancel 负责。
@@ -356,7 +321,7 @@ export function HUD() {
   /** 释放 pointer capture；失败时静默忽略（window 监听器仍可兜底）。 */
   const releasePointerCapture = (pointerId: number) => {
     try {
-      measureRef.current?.releasePointerCapture(pointerId)
+      rootRef.current?.releasePointerCapture(pointerId)
     } catch {
       // ignore
     }
@@ -426,12 +391,24 @@ export function HUD() {
     }
   }
 
-  /** 把当前窗口物理坐标持久化到 Rust（贴边吸附 / 工作区钳制由 Rust 完成）。 */
+  /**
+   * 把当前窗口物理坐标持久化到 Rust（贴边吸附 / 工作区钳制由 Rust 完成）。
+   *
+   * 随坐标带上**可见胶囊**的实际尺寸（逻辑 px）：吸附数学在 Rust，而胶囊在 280×64 窗口内
+   * 居中——不带尺寸时 Rust 只能按窗口外框贴边，待机胶囊会离屏幕边 ~(280-104)/2 ≈ 88px。
+   * 测量时机是「拖拽松手之后」（persist-position 命令），只读 offsetWidth/offsetHeight
+   * 一次性读取布局尺寸，绝不触发 resize / 重绘回路，与手势期几何不变量无冲突。
+   */
   const persistDragPosition = useCallback(async () => {
     try {
+      const box = capsuleBoxRef.current
+      const capsule =
+        box && box.offsetWidth > 0 && box.offsetHeight > 0
+          ? { width: box.offsetWidth, height: box.offsetHeight }
+          : undefined
       const win = getOverlayWindow()
       const pos = await win.outerPosition()
-      await window.electronAPI.setOverlayPosition(pos.x, pos.y)
+      await window.electronAPI.setOverlayPosition(pos.x, pos.y, capsule)
     } catch {
       // 持久化失败不阻塞 UI，下次拖拽会重试
     }
@@ -536,12 +513,6 @@ export function HUD() {
         case 'clear-hold-timer':
           clearHoldTimer()
           break
-        case 'suppress-resize':
-          // resizeSuppressed 已在状态机状态中更新，无需额外动作
-          break
-        case 'allow-resize':
-          scheduleOverlayResize()
-          break
         case 'move':
           scheduleDragMove(cmd.pos)
           break
@@ -559,13 +530,14 @@ export function HUD() {
   /**
    * 待机胶囊 pointerdown：开始一次指针手势（**不立即开录**）。
    *
-   * 监听挂在**整个 overlay 窗口**的容器上（而不是只挂在胶囊 `<button>` 上）：窗口按
-   * 内容尺寸缩放后胶囊四周仍有不可见的窗口空白，且 `<button>` 的圆角本身也会让
-   * 四角不参与命中；只挂胶囊会让落在胶囊边缘/上下的按下「完全无反应」（0.5.1 回归
-   * 缺陷现象之一）。整窗即热区后，点在窗口内任意位置都能开始手势。
+   * 监听挂在**整个 overlay 窗口**的容器上（而不是只挂在胶囊 `<button>` 上）：待机胶囊比
+   * 窗口小，胶囊四周有不可见的窗口空白，且 `<button>` 的圆角本身也会让四角不参与命中；
+   * 只挂胶囊会让落在胶囊边缘/上下的按下「完全无反应」（0.5.1 回归缺陷现象之一）。整窗即热区后，
+   * 点在窗口内任意位置都能开始手势。
    *
    * 手势结果由状态机裁决：轻点 → 松手时 latch 启动并保持；右键 / 中键同左键；位移超过
-   * 阈值 → 拖拽移窗（绝不启动会话）；停留过阈值 → 按住 PTT。
+   * 阈值 → 拖拽移窗（绝不启动会话）；停留过阈值 → 按住 PTT。窗口尺寸在整个手势 / 会话期间
+   * 恒定（不 resize / 不重锚定），故手势绝不会被自身的几何变化打断。
    */
   const handleIdlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     const [nextState, cmds] = onPointerDown(
@@ -629,16 +601,19 @@ export function HUD() {
 
   return (
     <div
+      ref={rootRef}
       className="pointer-events-auto fixed inset-0 flex items-center justify-center"
       onPointerDown={handleIdlePointerDown}
       onDoubleClick={handleIdleDoubleClick}
       onContextMenu={(event) => event.preventDefault()}
     >
-      {/* 测量容器：无自身 transform，rect 恒等于胶囊布局尺寸，供窗口缩放 */}
-      <div ref={measureRef} className="flex shrink-0">
+      {/* 布局容器：窗口常驻 280×64，胶囊居中于窗口（不再随状态缩放窗口）。
+          同时是 persist-position 的胶囊尺寸测量盒（shrink-wrap = 胶囊实际尺寸）。 */}
+      <div ref={capsuleBoxRef} className="flex shrink-0">
         {status === 'idle' ? (
           // 待机态：小尺寸低调胶囊。仅作视觉主体，pointerdown / dblclick 等交互
-          // 统一挂在整窗容器上（见 handleIdlePointerDown 注释），避免只命中胶囊本体。
+          // 统一挂在整窗容器上（见 handleIdlePointerDown 注释）。不设 title，
+          // 避免悬停弹出原生 tooltip（aria-label 保留可访问性）。
           <button
             type="button"
             className={cn(
@@ -649,7 +624,6 @@ export function HUD() {
                 ? 'translate-y-0 scale-100 opacity-100 blur-0'
                 : 'translate-y-2 scale-95 opacity-0 blur-sm',
             )}
-            title={t('hud.holdToTalk')}
             aria-label={t('hud.holdToTalk')}
           >
             <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/10 text-neutral-300">
