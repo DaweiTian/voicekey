@@ -233,7 +233,12 @@ fn session_active<R: Runtime>(app: &AppHandle<R>) -> bool {
         .map(|s| {
             s.session
                 .lock()
-                .map(|st| matches!(st.status, SessionStatus::Recording | SessionStatus::Processing))
+                .map(|st| {
+                    matches!(
+                        st.status,
+                        SessionStatus::Recording | SessionStatus::Processing
+                    )
+                })
                 .unwrap_or(false)
         })
         .unwrap_or(false)
@@ -241,11 +246,17 @@ fn session_active<R: Runtime>(app: &AppHandle<R>) -> bool {
 
 /// 更新 HUD 胶囊状态，除非语音会话正占用它：翻译反馈绝不能覆盖
 /// recording / processing 显示。
+///
+/// 反馈同时点亮底部居中的 session 胶囊（`commands::session_show_for_feedback`，
+/// 会话占用时自动跳过）：0.5.6 起成功 / 错误视觉只在 session 窗渲染，overlay
+/// 待机胶囊不再承载会话态——不点亮 session 窗的话翻译反馈将无处显示；顺带
+/// 修复了「托盘隐藏悬浮胶囊后翻译反馈不可见」的旧问题。
 fn emit_overlay<R: Runtime>(app: &AppHandle<R>, payload: Value) {
     if session_active(app) {
         return;
     }
     let _ = app.emit("overlay-update", payload);
+    crate::commands::session_show_for_feedback(app);
 }
 
 // 翻译反馈（success / error）短暂停留后把胶囊送回待机：复用
@@ -337,8 +348,7 @@ async fn run<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
     // 6. 粘贴前复查选区未变（蓝本 `confirmSelectionStillMatches`）：防止 LLM
     //    往返期间焦点 / 选区漂移后把译文贴到错误位置。
     match capture_selection(&mut guard).await? {
-        Some(current)
-            if normalize_line_endings(&current) == normalize_line_endings(&original) => {}
+        Some(current) if normalize_line_endings(&current) == normalize_line_endings(&original) => {}
         _ => {
             return Err("选中内容已变化或已取消，为避免误替换未写回译文，请重新选中后重试。".into())
         }

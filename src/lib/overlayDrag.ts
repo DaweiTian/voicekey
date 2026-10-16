@@ -1,4 +1,4 @@
-import type { OverlayStatus } from '@/shared/types'
+import type { OverlayEdge, OverlayStatus } from '@/shared/types'
 
 /**
  * 纯函数模块：封装 overlay HUD 胶囊的拖拽 / 点按切换 / 按住说话状态机。
@@ -422,4 +422,45 @@ export function onDoubleClick(
   if (now - state.lastTap.time > DOUBLE_CLICK_MAX_MS) return [state, []]
 
   return [{ ...state, lastTap: null }, [{ type: 'set-overlay-position', x: null, y: null }]]
+}
+
+/**
+ * 「胶囊已贴边吸附（docked）」判定：校验 `setOverlayPosition` 返回值或配置字段
+ * `app.overlayDocked` 是否是合法的工作区边。
+ *
+ * Rust 只会产出 `"left" | "right" | "top" | "bottom"` 或 `null`，但 invoke 边界的
+ * 数据一律按不可信处理：未知字符串 / 数字 / 对象一律视为「未吸附」（胶囊保持全形），
+ * 绝不让脏值触发 HUD 的紧凑形态。纯函数，供 HUD 在 persist / reset 返回值与启动时
+ * 读取配置两处共用。
+ */
+export function isOverlayEdge(value: unknown): value is OverlayEdge {
+  return value === 'left' || value === 'right' || value === 'top' || value === 'bottom'
+}
+
+/**
+ * 贴边紧凑胶囊的边长（**逻辑 px** = Tailwind `h-8`）。
+ *
+ * 为什么是 32 而不是全形的 36：0.5.4 的中线落点让吸附后的**窗口中心线**恰在工作区
+ * 边上，屏内可见半区 = 窗口的一半——左右为 280/2 = 140px（充裕），**上下只有
+ * 64/2 = 32px**。紧凑胶囊必须 ≤32px 高才能在上/下吸附时整只落在屏内（36 会被裁 4px，
+ * 乘 DPI 后更多）。图标 chip 20px 居中，两侧各留 (32−20)/2 = 6px 内缩。
+ */
+export const DOCK_COMPACT_PX = 32
+
+/**
+ * 各吸附边 → 紧凑胶囊贴齐窗口中线（= 屏幕边）的**位移类**（Tailwind 静态类，
+ * 必须是字面量才能被 JIT 扫描到）。
+ *
+ * 位移绝对值 = `DOCK_COMPACT_PX / 2` = 16px = spacing-4：把胶囊外缘正好推到中线上，
+ * 于是整只胶囊（含图标 chip）完全落在屏内可见半区，屏幕边缘刚好托住胶囊外缘。
+ * 符号一律指向屏内（left/top 往右下、right/bottom 往左上）。
+ *
+ * 由 `docked_compact_capsule_is_fully_visible_on_every_edge` 锁定「类 ↔ 16px ↔ 轴向 ↔
+ * 符号」的一致性，并推演四边可见性（含窗口边界与图标内缩）。
+ */
+export const DOCK_TRANSLATE: Record<OverlayEdge, string> = {
+  left: 'translate-x-4',
+  right: '-translate-x-4',
+  top: 'translate-y-4',
+  bottom: '-translate-y-4',
 }

@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.6](https://github.com/BuildWithAIs/voicekey/compare/v0.5.5...v0.5.6) (2026-10-17)
+
+### Features
+
+- **overlay:** 录音/识别大胶囊与待机悬浮按钮解耦为独立会话窗口：大胶囊固定显示在屏幕底部居中（光标所在显示器），隐藏悬浮按钮后中键/快捷键触发录音仍正常显示，按住说话期间两胶囊同显
+- **overlay:** 待机胶囊贴边吸附后收缩为 32×32 紧凑麦克风图标并完整贴齐屏幕边缘（拖出/复位自动还原带文字全形）
+
+### Bug Fixes
+
+- **overlay:** 胶囊上方偶现的「芷若」白条——WebView2 144.x 幽灵标题栏上游回归（焦点切换重绘），窗口获得焦点与显示时以 1px 尺寸轻推清除，DWM 属性改查返回值记录日志
+- **ui:** 主窗口获得焦点时边缘蓝色系统强调边框——激活时重新应用无色边框属性（此前仅创建时设置一次）
+- **ui:** 侧栏折叠按钮被主内容遮挡（侧栏 overflow 裁剪）——按钮移至独立层叠容器
+- **ui:** 侧栏折叠后菜单转为 40×40 图标按钮（点击导航、悬停提示），折叠宽度 24px→48px
+
 ## [0.5.5](https://github.com/BuildWithAIs/voicekey/compare/v0.5.4...v0.5.5) (2026-10-16)
 
 ### Features

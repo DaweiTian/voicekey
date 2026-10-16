@@ -12,7 +12,12 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   其余含 `tauri-plugin-autostart`）、主窗口 CloseRequested → 隐藏到托盘并启动 5 分钟
   延迟销毁（`windowing`）（唯一真正退出路径是托盘 Quit）、overlay CloseRequested →
   `prevent_close` + `commands::hide_overlay`（悬浮胶囊绝不销毁，渲染层持有
-  `core:window:allow-close`）、setup 时对现有窗口做 Windows 焦点框硬化首遍，并初始化
+  `core:window:allow-close`）、session CloseRequested → `prevent_close` +
+  `commands::hide_session`（会话胶囊同样绝不销毁；**只隐藏、绝不动 overlay 的
+  `app.overlayVisible`**，两窗显隐彻底解耦），`Focused` 分支与幽灵标题栏清理均按
+  label 覆盖 main/overlay/session 三窗（session 复用 `harden_overlay_window` 同款
+  硬化——同形同需求，漏掉即重蹈蓝边框/白条两个 bug），setup 时对现有窗口做 Windows
+  焦点框硬化首遍，并初始化
   鼠标中键 PTT（`mouse.rs`）与常驻待机 HUD 胶囊（`commands::show_overlay_idle`）。
 - `src/windowing.rs` - 窗口生命周期共用逻辑：Windows 焦点框硬化（overlay：
   `WS_EX_NOACTIVATE` + `DWMWA_BORDER_COLOR=NONE` 幂等重施；**另剥离原生标题栏/边框
@@ -25,15 +30,39 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `DWMWA_WINDOW_CORNER_PREFERENCE=DWMWCP_DONOTROUND`、`DWMWA_SYSTEMBACKDROP_TYPE=DWMSBT_NONE`
   清掉 DWM 自绘的不透明底——Win11 默认 `DWMSBT_AUTO` 会给无边框置顶 `WS_POPUP` 胶囊
   自动套一层次生 Acrylic 背板，而背板是"采样其下层"的，故胶囊叠在自家浅色主窗口上才
-  显白/灰矩形（叠桌面/他应用无此采样）；main：仅去 DWM 焦点框，
-  **不加** `WS_EX_NOACTIVATE`，保留应用自绘 CSS 边框）。**回归警示**：
+  显白/灰矩形（叠桌面/他应用无此采样）；main：仅去 DWM 焦点框
+  （`DWMWA_BORDER_COLOR=NONE`），
+  **不加** `WS_EX_NOACTIVATE`，保留应用自绘 CSS 边框）。**主窗蓝色焦点边框（0.5.5 实测第三条）**：
+  Win11 主窗获焦时 DWM 会重画系统强调色 1px 焦点边框——MSDN 明示 app「负责按状态变化（如窗口
+  激活）改边框色」，故**创建时设一次不够**，必须在**每次激活重申** `DWMWA_BORDER_COLOR=DWMWA_COLOR_NONE`
+  （= `0xFFFF_FFFE`；`DWMWA_COLOR_DEFAULT`=`0xFFFF_FFFF` 反而恢复强调色，勿用）。由 `lib.rs` 的
+  `Focused` 事件处理器对**获焦窗口**按其 label 重申 hardening（main→`harden_main_window`、
+  overlay/session→`harden_overlay_window`，均幂等且廉价）解决；overlay 与 session 因
+  `WS_EX_NOACTIVATE` 通常不获焦，同设仅为预防。该属性需 Win11 build 22000+，旧系统静默忽略——已加 HRESULT `< 0` 检查 +
+  `log::warn!` 便于诊断。**回归警示**：
   `DWMWA_COLOR_NONE` 必须使用 windows-sys 导出的常量（= `0xFFFF_FFFE`，MSDN
   DWMWINDOWATTRIBUTE）；早前手写错误字面量 `0x0100_0000` 被 DWM 当作 COLORREF，
   边框被染成近黑色而非去除，令整项修复静默失效。**另注**：`DWMWA_*` 属性只需已启用的
   `Win32_Graphics_Dwm` feature；**不复用** tao 建窗时的 `DwmEnableBlurBehindWindow`
   空区域透明（`DWM_BLURBEHIND`/`CreateRectRgn` 需 `Win32_Graphics_Gdi`，当前未启用）；
   `tauri.conf.json` 的 `noRedirectionBitmap` 在本版 Tauri 是**死配置**
-  （tauri-runtime-wry 从未调用 tao 的 `with_no_redirection_bitmap`），不要依赖。主窗口隐藏到托盘后延迟 5 分
+  （tauri-runtime-wry 从未调用 tao 的 `with_no_redirection_bitmap`），不要依赖。**WebView2 幽灵标题栏（0.5.4 残留白条的根因）**：样式剥离 + DWM 清理之后，胶囊
+  上方仍可能出现一条浅色横条（横条文字 = 页面 `<title>`，即「芷若」）、随胶囊拖动、并在窗口
+  激活 / 聚焦切换时出现、点胶囊（触发形变 = resize）或切走后又消失。它**不是窗口样式**
+  （`GWL_STYLE` 已无 `WS_CAPTION`，正是两轮样式剥离除不掉的原因），而是 **WebView2 运行时
+  144.x 回归**（tauri#14764 / WebView2Feedback#5492；Edge 146 起上游已修，未升级运行时的机器
+  仍在）。唯一可靠解法是**改变窗口尺寸**：`clear_webview_ghost_titlebar` 对 overlay 做一次
+  「高度 +1 再还原」的 1px 轻推 —— 带 `AtomicBool` 重入守卫（轻推会触发 `Resized`，若
+  `Resized` 处理器也轻推即死循环），挂在每次 `overlay_show` / `session_show`
+  （`show_overlay_window` / `show_session_window`）与
+  overlay/session/main 三窗口的 `Focused` 事件（`lib.rs`，激活路径）上；胶囊隐藏时跳过。另
+  `clear_dwm_window_backdrop` 的三个 `DwmSetWindowAttribute` 返回值由 `let _ =` 改为查
+  `HRESULT`、`< 0` 时 `log::warn!`（旧系统会静默拒绝 `DWMWA_SYSTEMBACKDROP_TYPE` 等新
+  属性），便于诊断。**后备方案（评估后未采用）**：去掉 Windows 上 tao 的 `.transparent(true)`
+  标志、改调 `DwmEnableBlurBehindWindow` + 启动前设 `WEBVIEW2_DEFAULT_BACKGROUND_COLOR=00000000`
+  以同样恢复透明（s1gh/RLToolkit 方案，可从源头消除触发条件）——未采用原因：`transparent` 在
+  `tauri.conf.json` 无法按平台分支（会破坏 Linux/macOS 透明）、需新增 `Win32_Graphics_Gdi`
+  feature 与启动前环境变量、且无法在本环境 GUI 实测，风险高于收益；WebView2 上游已修。主窗口隐藏到托盘后延迟 5 分
   钟 `destroy()` 整个 main WebView 进程，5 分钟内重开则通过 generation 计数取消销毁；
   `ensure_main_window` 幂等重建（label 仍为 `"main"`，尺寸/位置/decorations 与
   `tauri.conf.json` 的 main 条目一致），`open_main_window` 为所有打开路径（托盘
@@ -41,7 +70,11 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   避开 Windows 上 wry#583 主线程建窗死锁）。另有 `ensure_overlay_window`：悬浮胶囊
   正常只 hide/show，但若某条关闭路径真的销毁了 overlay 窗口，它按 `tauri.conf.json`
   的 overlay 条目同形幂等重建（同样只在工作线程调用），保证托盘"显示悬浮胶囊"永远
-  能把胶囊找回来。
+  能把胶囊找回来。`ensure_session_window` 是会话胶囊（0.5.6 解耦新增的 `session`
+  窗，`tauri.conf.json` 参数与 overlay 条目完全同源、共用 `harden_overlay_window`
+  全套硬化）的同款兜底重建：会话窗正常只 hide/show，真被销毁后由会话启动路径在
+  工作线程按 `session` 条目同形重建，保证「会话启动总能让下方居中胶囊出现」。
+  `harden_app_windows` 的 label 分支同步覆盖 session（→ `harden_overlay_window`）。
 - `src/tray.rs` - **唯一**托盘来源（`tauri.conf.json` 不再配置 `app.trayIcon`，
   否则会出现两个图标）。右键菜单：Open Zhiruo / Settings / Launch at login
   （可勾选，纯 Rust 侧 enable/disable 并同步勾选态）/ Show floating capsule
@@ -52,10 +85,11 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `commands::hide_overlay`，两者都会把 flag 与勾选态同步到实际达到的状态
   （`set_overlay_menu_checked` 注册的 checkmark setter 供其他隐藏路径复用）/ Quit。
 - `src/commands.rs` - 前端 invoke 命令。HUD overlay 为常驻待机胶囊（启动时显示，
-  idle → recording → processing → success/error → 回 idle，会话结束不再隐藏），
-  定位优先使用持久化拖拽位置 `app.overlayPosition`（越界时按所在显示器工作区重钳制，
+  只渲染待机形态；会话态视觉在 session 窗），定位优先使用持久化拖拽位置
+  `app.overlayPosition`（越界时按所在显示器工作区重钳制，
   不回弹），否则「光标所在屏幕工作区底部居中、任务栏上方 ~48px」（
-  `position_overlay_bottom_center` / `position_overlay`），先定位后显示，并在 show
+  `position_overlay_bottom_center` / `position_overlay`，底部居中数学抽成纯函数
+  `bottom_center_in` 并单测），先定位后显示，并在 show
   前后幂等重施 overlay 硬化（常驻 show 路径同样走 `overlay_show`，硬化必生效）；
   `overlay_show` 尊重 `app.overlayVisible`（托盘隐藏后自动 show 跳过，胶囊保持隐藏），
   但托盘入口走 `show_overlay_forced` 强制复开，且 overlay 窗口缺失时经
@@ -63,6 +97,19 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `app.overlayVisible` 与托盘勾选态同步到真实状态（`hide_overlay` 同步隐藏语义；
   同步函数可从 overlay 重建工作线程调用：配置写盘走 `config.rs` 的 `CONFIG_LOCK`，
   托盘勾选态变更经 `run_on_main_thread` 派回主线程，失败记 `log::warn!`）。
+  **会话胶囊（`session` 窗，0.5.6 解耦）**：`start_session_internal` 在每次会话
+  成功启动后（无论键盘 PTT / 鼠标中键 / hold / latch 触发）无条件
+  `session_show`——**与 overlay 显隐、拖拽位置完全无关**（托盘隐藏悬浮胶囊后
+  触发录音，下方居中大胶囊照常出现）；每次 show 把 session 窗一次性定位到
+  光标所在监视器工作区底部居中（`position_session_bottom_center`，复用同一
+  `bottom_center_in`；会话期间不再移动，且**绝不触碰 overlay 窗几何**——hold
+  手势在指针下不受干扰）。隐藏收口唯一：`overlay_emit_idle`（回 standby 的
+  单一漏斗：成功/错误展示 1.2s 超时 `overlay_idle_later`、取消 `cancel_session`、
+  误触静默、托盘强制 show 时无会话、翻译反馈超时）先 `hide_session` 再广播
+  idle；`hide_session` 不带任何 flag 同步（与 `hide_overlay` 彻底解耦）。翻译
+  反馈（`translate.rs::emit_overlay`）经 `session_show_for_feedback` 点亮
+  session 窗，会话进行中自动跳过（不重锚定）。会话窗口缺失时经
+  `windowing::ensure_session_window` 在工作线程重建。
   `set_overlay_size` 命令（渲染层契约：invoke 名 `set_overlay_size`、参数
   `{ width, height }`，逻辑像素）把 overlay `set_size` 为夹取后的尺寸
   （40..=400 × 32..=120）并经 `position_overlay` 保持持久化位置/底部居中。
@@ -78,14 +125,24 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   仅钳制（按胶囊中心）并按原地持久化。无 `capsule`（或 malformed——非数值 / 非有限 /
   超出窗口尺寸，静默忽略）时回退旧的窗口外框吸附（间隙 10 物理像素、无阈值、整窗
   钳制，行为不变）。吸附落点计算
-  抽成纯函数 `snap_overlay_position`（窗口尺寸/胶囊尺寸/候选位置/work area → 吸附后
-  窗口位置或 `None`），单测覆盖两态胶囊四边中线贴边 ≤2px（半隐）、超阈值不吸附、回退
-  旧行为、malformed 校验与半隐坐标再钳制存活。落点钳制后移动窗口并持久化到
-  `app.overlayPosition: {x, y}`（多显示器/DPI 安全，与 `position_overlay_bottom_center`
+  抽成纯函数 `snap_overlay_position`（窗口尺寸/胶囊尺寸/候选位置/work area →
+  `SnapLanding { pos, edge }` 或 `None`；`edge` 即吸附到的 `left`/`right`/`top`/
+  `bottom`），单测覆盖两态胶囊四边中线贴边 ≤2px（半隐，且所报 edge 与目标边一致）、
+  超阈值不吸附、回退旧行为、malformed 校验与半隐坐标再钳制存活。落点钳制后移动窗口并
+  持久化到 `app.overlayPosition: {x, y}`，同时同批写 `app.overlayDocked`
+  （`"left"|"right"|"top"|"bottom"` 或 `null`；config.rs merge 字段级校验：未知字符串
+  忽略、`null` 清除）（多显示器/DPI 安全，与 `position_overlay_bottom_center`
   同一套物理像素换算；钳制语义为**胶囊中心线**留在工作区内——中线贴边即半隐停靠位、
   合法，show/托盘复开/重启重锚定绝不回退半隐坐标，中心出界才拉回且至少露出半胶囊）；
-  传 `null`（任一坐标）则清除持久化并回到底部居中默认位（默认/复位位走整窗钳制、
-  **完整显示**，不经过吸附）。
+  传 `null`（任一坐标）则 position 与 docked 一并清除并回到底部居中默认位
+  （默认/复位位走整窗钳制、**完整显示**，不经过吸附）。
+  **返回值** `Result<Option<String>, String>`（invoke 序列化为 JSON `string | null`，
+  旧调用忽略返回值、向后兼容）：吸附成功 → `Some(edge)`；超阈值仅钳制的落位与复位
+  分支 → `None`。渲染层据此切换待机胶囊形态（贴边 → 紧凑仅图标；拖拽一进入 dragging
+  即还原全形、松手 persist 返回值定夺），并经 `get_config` 读 `app.overlayDocked`
+  在重启后恢复同一形态。返回值与配置补丁由单测
+  `snap_reports_docked_edge_for_renderer_contract` /
+  `config_patches_persist_dock_state_with_position` 覆盖。
   `OverlayFrame::apply` 在目标坐标与 `outer_position` 相同（±1 物理像素）时跳过
   `set_position`：同坐标 SetWindowPos 无视觉效果但会进入窗口过程，而
   `start_session_internal` 每次启动会话都途经此处且彼时可能仍有指针手势在途

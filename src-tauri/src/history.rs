@@ -50,7 +50,10 @@ impl HistoryManager {
 
     fn prune(items: Vec<HistoryItem>) -> Vec<HistoryItem> {
         let cutoff = now_ms().saturating_sub(HISTORY_RETENTION_DAYS as u64 * 24 * 60 * 60 * 1000);
-        items.into_iter().filter(|i| i.timestamp >= cutoff).collect()
+        items
+            .into_iter()
+            .filter(|i| i.timestamp >= cutoff)
+            .collect()
     }
 
     pub fn get_all() -> Vec<HistoryItem> {

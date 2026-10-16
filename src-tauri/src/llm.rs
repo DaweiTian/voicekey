@@ -257,10 +257,7 @@ pub async fn test_connection(config: &LLMRefineConfig) -> RefineConnectionResult
             ok: true,
             message: "Connection succeeded".into(),
         },
-        Err(message) => RefineConnectionResult {
-            ok: false,
-            message,
-        },
+        Err(message) => RefineConnectionResult { ok: false, message },
     }
 }
 

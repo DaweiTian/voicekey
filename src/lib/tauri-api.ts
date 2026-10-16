@@ -17,6 +17,7 @@ import type {
   LocalASRStatus,
   LogEntryPayload,
   LogTailOptions,
+  OverlayEdge,
   OverlayState,
   RefineConnectionResult,
   RecordingStartPayload as SharedRecordingStartPayload,
@@ -199,13 +200,16 @@ export const tauriApi = {
 
   // Overlay 窗口位置持久化：渲染层在拖拽释放后把物理像素坐标发给 Rust，
   // Rust 负责贴边吸附、工作区钳制、持久化；传 null, null 表示重置为底部居中。
+  // 返回值 = 本次落位是否「吸附贴边」：`'left' | 'right' | 'top' | 'bottom'` 表示吸附到了
+  // 该工作区边（docked，HUD 待机胶囊渲染紧凑形态），`null` 表示超磁性阈值仅钳制落位 /
+  // 重置分支（保持全形）。旧调用忽略返回值也不受影响（向后兼容）。
   setOverlayPosition: (
     x: number | null,
     y: number | null,
     // 可选：可见胶囊的实际尺寸（逻辑 px，DOM offsetWidth/offsetHeight）。Rust 据此做
     // 「胶囊贴边」吸附；缺省（或 malformed）回退按窗口外框吸附的旧行为。
     capsule?: { width: number; height: number },
-  ) => invoke<void>('set_overlay_position', { x, y, capsule: capsule ?? null }),
+  ) => invoke<OverlayEdge | null>('set_overlay_position', { x, y, capsule: capsule ?? null }),
 
   // updates
   checkForUpdates: () => invoke<UpdateInfo>('check_for_updates'),

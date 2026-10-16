@@ -6,27 +6,21 @@ import SettingsPage from './pages/SettingsPage'
 import HistoryPage from './pages/HistoryPage'
 import { AudioRecorder } from './components/AudioRecorder'
 import { HUD } from './components/HUD'
+import { SessionHUD } from './components/SessionHUD'
+import { resolveWindowKind, type WindowKind } from './shared/window-kind'
 
-type WindowKind = 'main' | 'overlay' | 'background' | 'unknown'
-
-function resolveWindowKind(): WindowKind {
+function readWindowKind(): WindowKind {
+  let label: string | null = null
   try {
-    const label = getCurrentWindow().label
-    if (label === 'main' || label === 'overlay' || label === 'background') {
-      return label
-    }
+    label = getCurrentWindow().label
   } catch {
-    // Not running inside Tauri (browser preview).
+    // Not running inside Tauri (browser preview): hash decides.
   }
-
-  const hash = window.location.hash.slice(1) || ''
-  if (hash === '/overlay') return 'overlay'
-  if (!hash || hash === '/') return 'background'
-  return 'main'
+  return resolveWindowKind(label, window.location.hash.slice(1))
 }
 
 function App() {
-  const [windowKind] = useState<WindowKind>(() => resolveWindowKind())
+  const [windowKind] = useState<WindowKind>(() => readWindowKind())
   const [currentRoute, setCurrentRoute] = useState(() => {
     const hash = window.location.hash.slice(1) || ''
     return hash && hash !== '/' ? hash : '/settings'
@@ -47,8 +41,15 @@ function App() {
     return <AudioRecorder />
   }
 
+  // Standby capsule: draggable / dockable idle + latched launcher (overlay window).
   if (windowKind === 'overlay') {
     return <HUD />
+  }
+
+  // Session capsule: fixed bottom-center recording / processing / result
+  // visuals (session window, shown & positioned by Rust per session start).
+  if (windowKind === 'session') {
+    return <SessionHUD />
   }
 
   const getPage = () => {

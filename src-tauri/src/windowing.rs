@@ -6,7 +6,9 @@
 //!    around an activated borderless window. The HUD overlay must never get one
 //!    (`WS_EX_NOACTIVATE` + `DWMWA_BORDER_COLOR=NONE`), while the main window
 //!    only loses the system border (`DWMWA_BORDER_COLOR=NONE`) and stays
-//!    focusable. The overlay *additionally* has its native caption / sizing-frame
+//!    focusable. Because DWM redraws the accent focus border on every
+//!    activation, the suppression is re-asserted from `lib.rs`'s `Focused`
+//!    handler, not only at window creation. The overlay *additionally* has its native caption / sizing-frame
 //!    window bits stripped (see [`strip_native_frame`]): tao builds every window
 //!    with `WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` and only
 //!    hides them by collapsing the client area - a hidden trap that makes Windows
@@ -27,6 +29,14 @@
 //!    CloseRequested handler existed) [`ensure_overlay_window`] rebuilds it
 //!    from the same shape as the `overlay` entry in `tauri.conf.json`, so the
 //!    tray "Show floating capsule" entry can always bring it back.
+//! 4. **Session capsule rebuild.** The `session` window (the fixed
+//!    bottom-center session capsule, decoupled from the draggable overlay in
+//!    0.5.6) follows the same rule: [`ensure_session_window`] rebuilds it from
+//!    the same shape as the `session` entry in `tauri.conf.json` if a close
+//!    path ever really destroyed it, so a session start can always bring the
+//!    capsule up. It gets the *same* Windows hardening as the overlay
+//!    ([`harden_overlay_window`]): same geometry shape, same no-activate /
+//!    no-frame / no-opaque-base requirements.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -40,6 +50,13 @@ pub const MAIN_WINDOW_LABEL: &str = "main";
 
 /// Label of the HUD overlay window.
 pub const OVERLAY_WINDOW_LABEL: &str = "overlay";
+
+/// Label of the session capsule window (fixed bottom-center session visuals,
+/// decoupled from the draggable overlay capsule). Same rationale as
+/// [`OVERLAY_WINDOW_LABEL`]: `tauri.conf.json` and the renderer
+/// (`getCurrentWindow().label` → `App.tsx` routes it to `SessionHUD`) both
+/// rely on this exact string.
+pub const SESSION_WINDOW_LABEL: &str = "session";
 
 /// How long a hidden main window survives before its WebView process is
 /// destroyed to reclaim memory (the window itself already hid to the tray).
@@ -80,14 +97,29 @@ static MAIN_CREATION_LOCK: Mutex<()> = Mutex::new(());
 /// thread's creation message (wry#583).
 static OVERLAY_CREATION_LOCK: Mutex<()> = Mutex::new(());
 
+/// Serializes session-window (re)creation, same invariant as
+/// [`OVERLAY_CREATION_LOCK`]: [`ensure_session_window`] is only ever called
+/// from worker threads (`commands::session_show`'s rebuild thread), never from
+/// the main thread.
+static SESSION_CREATION_LOCK: Mutex<()> = Mutex::new(());
+
 // ---------------------------------------------------------------------------
 // Windows focus-frame hardening
 // ---------------------------------------------------------------------------
 
-/// Ask DWM to skip its 1px window border entirely (Windows 11 22H2+; silently
-/// ignored on older systems). Idempotent: safe to call as often as we like.
-/// Only the *system* frame is suppressed; the app's own CSS border keeps
+/// Ask DWM to suppress its window border entirely (Windows 11 build 22000+;
+/// silently ignored on older systems). Idempotent: safe to call as often as we
+/// like. Only the *system* border is suppressed; the app's own CSS keeps
 /// rendering as usual.
+///
+/// **Must be re-asserted on every activation.** MSDN is explicit that the app
+/// "is responsible for changing the border color according to state changes,
+/// such as a change in window activation": Windows 11 redraws the accent-color
+/// focus border the moment a window is activated, so the setup-time pass alone
+/// does not survive the first focus. That is exactly the reported defect - a
+/// blue focus ring appears on the main window the moment it gains focus - the
+/// attribute was set at creation but never re-asserted. The `Focused` hook in
+/// `lib.rs` re-runs the matching hardening pass on every focus change; keep it.
 #[cfg(target_os = "windows")]
 fn suppress_focus_frame<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     use windows_sys::Win32::Graphics::Dwm::{
@@ -107,12 +139,19 @@ fn suppress_focus_frame<R: tauri::Runtime>(window: &WebviewWindow<R>) {
         // REGRESSION WARNING: a hand-rolled literal of 0x0100_0000 was used
         // here once; DWM interpreted it as a COLORREF and painted the border
         // near-black instead of removing it, silently defeating the fix.
-        let _ = DwmSetWindowAttribute(
+        // (`DWMWA_COLOR_DEFAULT` = 0xFFFF_FFFF would *reset* to the system
+        // accent color, i.e. put the blue border back - do not use it here.)
+        let hr = DwmSetWindowAttribute(
             hwnd_ptr,
             DWMWA_BORDER_COLOR as _,
             &DWMWA_COLOR_NONE as *const u32 as *const _,
             std::mem::size_of::<u32>() as u32,
         );
+        if hr < 0 {
+            // Older Windows (< build 22000) rejects this attribute; nothing to
+            // do there, but log it so a failed suppression is never invisible.
+            log::warn!("DWMWA_BORDER_COLOR (none) not applied (HRESULT {hr:#010x})");
+        }
     }
 }
 
@@ -247,35 +286,93 @@ fn clear_dwm_window_backdrop<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     // i32-backed `DWMWINDOWATTRIBUTE` payloads) with its real size.
     let attr_size = std::mem::size_of::<u32>() as u32;
     unsafe {
+        // Each attribute returns an `HRESULT` (`windows_sys::core::HRESULT` =
+        // i32): 0 (S_OK) on success, negative on failure. Older Windows builds
+        // silently reject the newer attributes (e.g. `DWMWA_SYSTEMBACKDROP_TYPE`
+        // needs Win11 22H2+), so check the return and warn instead of assuming
+        // success - a `let _ =` here hides exactly the case where an opaque base
+        // survives and the capsule paints a rectangle again.
+
         // No DWM non-client rendering: no opaque base fill for the window.
         let nc_policy = DWMNCRP_DISABLED;
-        let _ = DwmSetWindowAttribute(
+        let hr = DwmSetWindowAttribute(
             hwnd_ptr,
             DWMWA_NCRENDERING_POLICY as _,
             &nc_policy as *const _ as *const _,
             attr_size,
         );
+        if hr < 0 {
+            log::warn!("DWMWA_NCRENDERING_POLICY not applied (HRESULT {hr:#010x})");
+        }
 
         // Never round the capsule: rounding would clip an opaque base into a
         // visible rounded rectangle around the capsule's transparent corners.
         let corner = DWMWCP_DONOTROUND;
-        let _ = DwmSetWindowAttribute(
+        let hr = DwmSetWindowAttribute(
             hwnd_ptr,
             DWMWA_WINDOW_CORNER_PREFERENCE as _,
             &corner as *const _ as *const _,
             attr_size,
         );
+        if hr < 0 {
+            log::warn!("DWMWA_WINDOW_CORNER_PREFERENCE not applied (HRESULT {hr:#010x})");
+        }
 
         // Force the system backdrop off (Mica / Acrylic / Tabbed). This is the
         // attribute that removes the sibling-window-dependent white/gray base.
         let backdrop = DWMSBT_NONE;
-        let _ = DwmSetWindowAttribute(
+        let hr = DwmSetWindowAttribute(
             hwnd_ptr,
             DWMWA_SYSTEMBACKDROP_TYPE as _,
             &backdrop as *const _ as *const _,
             attr_size,
         );
+        if hr < 0 {
+            log::warn!("DWMWA_SYSTEMBACKDROP_TYPE not applied (HRESULT {hr:#010x})");
+        }
     }
+}
+
+/// Clear the WebView2 "ghost titlebar" that WebView2 runtime 144+ paints over a
+/// transparent window ([tauri#14764], upstream [WebView2Feedback#5492]).
+///
+/// Why this exists: after the native caption is stripped
+/// ([`strip_native_frame`]) and DWM's opaque base is cleared
+/// ([`clear_dwm_window_backdrop`]), a *third*, independent layer can still show
+/// a light bar carrying the page `<title>` text above the capsule. That bar
+/// follows the capsule while dragging and (re)appears on any activation / focus
+/// change - opening the settings window, switching apps. It is **not** a window
+/// style: `GWL_STYLE` already reports `WS_CAPTION` absent while the bar stays
+/// painted, which is exactly why two rounds of style stripping could not remove
+/// it. It is a WebView2 144.x regression, fixed upstream in Edge 146 / stable
+/// but still live on unpatched runtimes.
+///
+/// The one reliable cure reported upstream is a **resize** (the issue records
+/// that resizing the window makes the bar disappear, and our own symptom
+/// matches: deforming the capsule - which resizes the window - clears it). So
+/// nudge the window's height by one physical pixel and immediately back:
+/// WebView2 repaints the host surface and drops the stale bar. Cheap and
+/// idempotent.
+///
+/// The re-entrancy guard is essential: the nudge fires `Resized`, and any
+/// `Resized` handler that itself nudged would loop forever (an upstream
+/// workaround regressed the window off-screen that way). This runs at most once
+/// at a time and is never called from a `Resized` handler.
+///
+/// [tauri#14764]: https://github.com/tauri-apps/tauri/issues/14764
+/// [WebView2Feedback#5492]: https://github.com/MicrosoftEdge/WebView2Feedback/issues/5492
+#[cfg(target_os = "windows")]
+pub fn clear_webview_ghost_titlebar<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static NUDGING: AtomicBool = AtomicBool::new(false);
+    if NUDGING.swap(true, Ordering::SeqCst) {
+        return; // a nudge is already in flight (its Resized echo is ignored)
+    }
+    if let Ok(size) = window.inner_size() {
+        let _ = window.set_size(tauri::PhysicalSize::new(size.width, size.height + 1));
+        let _ = window.set_size(tauri::PhysicalSize::new(size.width, size.height));
+    }
+    NUDGING.store(false, Ordering::SeqCst);
 }
 
 /// Full hardening for the HUD overlay: it must never activate, never draw the
@@ -306,6 +403,11 @@ pub fn harden_overlay_window<R: tauri::Runtime>(_window: &WebviewWindow<R>) {}
 #[cfg(not(target_os = "windows"))]
 pub fn harden_main_window<R: tauri::Runtime>(_window: &WebviewWindow<R>) {}
 
+/// Non-Windows stub: the WebView2 ghost-titlebar regression is Windows-only, so
+/// there is nothing to clear elsewhere.
+#[cfg(not(target_os = "windows"))]
+pub fn clear_webview_ghost_titlebar<R: tauri::Runtime>(_window: &WebviewWindow<R>) {}
+
 /// Apply the per-window hardening to every window that exists right now.
 ///
 /// Called from `setup` as the best-effort first pass. If a window (typically
@@ -316,7 +418,10 @@ pub fn harden_app_windows<R: tauri::Runtime>(app: &AppHandle<R>) {
     for (label, window) in app.webview_windows() {
         match label.as_str() {
             MAIN_WINDOW_LABEL => harden_main_window(&window),
-            OVERLAY_WINDOW_LABEL => harden_overlay_window(&window),
+            // The session capsule is the overlay's twin (same shape, same
+            // no-activate / no-frame requirements), so it gets the same
+            // hardening pass.
+            OVERLAY_WINDOW_LABEL | SESSION_WINDOW_LABEL => harden_overlay_window(&window),
             _ => {}
         }
     }
@@ -547,6 +652,87 @@ fn build_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<
     });
 
     // Never leave a freshly built overlay without its no-activate hardening.
+    harden_overlay_window(&window);
+    Ok(window)
+}
+
+// ---------------------------------------------------------------------------
+// Session capsule rebuild lifecycle
+// ---------------------------------------------------------------------------
+
+/// Get the session capsule window, rebuilding it on demand if a close path
+/// destroyed it.
+///
+/// The session window (fixed bottom-center session visuals, shown by
+/// `commands::session_show` on every session start) is normally only hidden
+/// (`commands::session_hide`), and the `CloseRequested` handler in `lib.rs`
+/// converts a renderer close into a hidden window. The rebuild mirrors
+/// [`ensure_overlay_window`]: if a close path ever really destroyed the
+/// window, `AppHandle::get_webview_window` would silently return `None` and
+/// every session start would silently lose its capsule — rebuilding here keeps
+/// "a session start can always bring the capsule up".
+///
+/// Threading: only call from worker threads - see [`SESSION_CREATION_LOCK`].
+pub fn ensure_session_window<R: tauri::Runtime>(app: &AppHandle<R>) -> Option<WebviewWindow<R>> {
+    let _guard = SESSION_CREATION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(window) = app.get_webview_window(SESSION_WINDOW_LABEL) {
+        harden_overlay_window(&window);
+        return Some(window);
+    }
+    match build_session_window(app) {
+        Ok(window) => Some(window),
+        Err(e) => {
+            // A concurrent rebuild won the race (duplicate label) or creation
+            // failed transiently: prefer the existing window over giving up.
+            log::warn!("session window build failed ({e}); falling back to the existing window");
+            let window = app.get_webview_window(SESSION_WINDOW_LABEL)?;
+            harden_overlay_window(&window);
+            Some(window)
+        }
+    }
+}
+
+/// Rebuild the session capsule with the same shape as the `session` entry in
+/// `tauri.conf.json` (280x64, decorations off, **shadow off**, transparent,
+/// always-on-top, skip-taskbar, not initially focused, hidden until shown).
+/// Keep the three in sync when the config changes - the shape is identical to
+/// [`build_overlay_window`] on purpose: the session capsule reuses the
+/// overlay's whole Windows hardening stack (no-activate, no DWM frame, no
+/// opaque backdrop) and its rendering surface.
+fn build_session_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<WebviewWindow<R>> {
+    let window = tauri::WebviewWindowBuilder::new(
+        app,
+        SESSION_WINDOW_LABEL,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("芷若")
+    .inner_size(280.0, 64.0)
+    .resizable(false)
+    .decorations(false)
+    .shadow(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .visible(false)
+    .build()?;
+
+    // Same CloseRequested -> hide behavior as the config-created window (the
+    // global `Builder::on_window_event` handler in `lib.rs` may already cover
+    // this rebuilt window; registering here is idempotent belt-and-braces,
+    // exactly like `build_overlay_window` above). Note this only *hides* — it
+    // must never touch the overlay's persisted visibility flag.
+    let handle = window.app_handle().clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            crate::commands::hide_session(&handle);
+        }
+    });
+
+    // Never leave a freshly built session capsule without its hardening.
     harden_overlay_window(&window);
     Ok(window)
 }

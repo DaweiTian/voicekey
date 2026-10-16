@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import type { OverlayStatus } from '@/shared/types'
 import {
+  DOCK_COMPACT_PX,
+  DOCK_TRANSLATE,
   DRAG_THRESHOLD_PX,
   DOUBLE_CLICK_MAX_MS,
   HOLD_LATCH_MAX_MS,
   SILENCE_AUTO_STOP_MS,
   WATCHDOG_MAX_MS,
   initialOverlayDragState,
+  isOverlayEdge,
   isSilenceAutoStopDue,
   onDoubleClick,
   onHoldTimer,
@@ -511,6 +514,90 @@ describe('window geometry invariant', () => {
     const [, upCmds] = onPointerUp(upEvent(1, { x: 140, y: 130 }), dragging, 20)
     for (const type of cmdTypes([...downCmds, ...moveCmds, ...upCmds])) {
       expect(NON_GEOMETRY_COMMANDS.has(type) || DRAG_ONLY_COMMANDS.has(type)).toBe(true)
+    }
+  })
+})
+
+// docked 紧凑形态的输入收敛：`setOverlayPosition` 返回值（拖拽 persist / 双击复位）与
+// 启动时读到的配置 `app.overlayDocked` 都必须经 isOverlayEdge 判定。invoke 边界的数据
+// 一律按不可信处理——只有 Rust 约定的四个工作区边是 true，其余（含 null / 脏值）一律
+// false，保证未知数据永远渲染带文字的全形胶囊。
+describe('isOverlayEdge (docked compact capsule gate)', () => {
+  it('accepts the four work-area edges Rust can report', () => {
+    for (const edge of ['left', 'right', 'top', 'bottom']) {
+      expect(isOverlayEdge(edge)).toBe(true)
+    }
+  })
+
+  it('treats null, absent and malformed values as not docked', () => {
+    expect(isOverlayEdge(null)).toBe(false)
+    expect(isOverlayEdge(undefined)).toBe(false)
+    expect(isOverlayEdge('')).toBe(false)
+    expect(isOverlayEdge('LEFT')).toBe(false)
+    expect(isOverlayEdge('center')).toBe(false)
+    expect(isOverlayEdge(0)).toBe(false)
+    expect(isOverlayEdge({ edge: 'left' })).toBe(false)
+  })
+})
+
+// 贴边紧凑胶囊的几何推演（用户拍板：贴边后麦克风图标必须**完整**在屏内、屏幕边缘刚好
+// 托住图标，不能被切半）。坐标系取**窗口中线**为 0——0.5.4 中线落点保证吸附后该中线恰在
+// 工作区（屏幕）边上，故屏内可见半区 = 窗口一半：左右 280/2 = 140px 充裕，上下 64/2 =
+// 32px（正是紧凑胶囊 32px 的高度上限）。位移 = 边长/2 = 16px 把胶囊外缘压到中线上，
+// 于是整只胶囊（图标 chip 居中、内缩 6px）完全落在屏内。
+describe('docked compact capsule flush placement', () => {
+  const EDGES = ['left', 'right', 'top', 'bottom'] as const
+  /** overlay 常驻窗口（逻辑 px，零 resize 不变量）。 */
+  const WINDOW = { w: 280, h: 64 }
+  /** 图标 chip：`h-5 w-5`。 */
+  const ICON = 20
+  /** 贴齐位移绝对值 = 紧凑胶囊边长 / 2。 */
+  const OFFSET = DOCK_COMPACT_PX / 2
+
+  /** 解析 `-?translate-[xy]-N`（Tailwind spacing 格 = 4px）为轴向 + 有符号位移。 */
+  const parseTranslate = (cls: string): { axis: 'x' | 'y'; px: number } => {
+    const m = /^(-?)translate-([xy])-(\d+)$/.exec(cls)
+    if (!m) throw new Error(`unparsable dock translate class: ${cls}`)
+    return { axis: m[2] as 'x' | 'y', px: (m[1] === '-' ? -1 : 1) * Number(m[3]) * 4 }
+  }
+
+  it('offsets each edge by exactly half the capsule on the matching axis, pointing in-screen', () => {
+    expect(DOCK_COMPACT_PX).toBe(32)
+    for (const edge of EDGES) {
+      const { axis, px } = parseTranslate(DOCK_TRANSLATE[edge])
+      // 轴向：左右吸附动 x、上下吸附动 y。
+      expect(axis).toBe(edge === 'left' || edge === 'right' ? 'x' : 'y')
+      // 大小：恰好 边长/2 = 16px（外缘压中线 = 屏幕边）。
+      expect(Math.abs(px)).toBe(OFFSET)
+      // 符号：一律指向屏内（left/top 为正方向，right/bottom 为负方向）。
+      expect(px).toBe(edge === 'left' || edge === 'top' ? OFFSET : -OFFSET)
+    }
+  })
+
+  it('keeps the whole capsule and its icon chip inside the visible half-window on all four edges', () => {
+    for (const edge of EDGES) {
+      const { px } = parseTranslate(DOCK_TRANSLATE[edge])
+      const vertical = edge === 'top' || edge === 'bottom'
+      const axisWindow = vertical ? WINDOW.h : WINDOW.w
+      const half = axisWindow / 2
+      // 贴边前胶囊居中于中线，贴边后区间为 [px − 16, px + 16]。
+      const outer = px - OFFSET
+      const inner = px + OFFSET
+      // 屏内可见半区（相对中线）：left/top 内侧为正向，right/bottom 为负向。
+      const [visLo, visHi] = px > 0 ? [0, half] : [-half, 0]
+      expect(outer).toBeGreaterThanOrEqual(visLo)
+      expect(inner).toBeLessThanOrEqual(visHi)
+      // 图标 chip（20px 居中）距屏幕边的余量 = 16 − 10 = 6px：即使 DPI 舍入 / 浏览器
+      // 次像素布局让胶囊整体外移 ≤2 物理像素，图标仍 100% 在屏内（≥4px 余量）。
+      const iconMargin = Math.abs(px) - ICON / 2
+      expect(iconMargin).toBe(6)
+      expect(iconMargin).toBeGreaterThanOrEqual(4)
+      // 另一轴：胶囊居中 [−16, +16] 必须落在窗口半幅内（不被窗口裁切）。
+      const otherAxis = vertical ? WINDOW.w : WINDOW.h
+      expect(DOCK_COMPACT_PX).toBeLessThanOrEqual(otherAxis)
+      // 上下贴边时贴齐端同时压在窗口内缘（32 = 64/2）：内容永不越出窗口矩形。
+      expect(inner).toBeLessThanOrEqual(half)
+      expect(outer).toBeGreaterThanOrEqual(-half)
     }
   })
 })

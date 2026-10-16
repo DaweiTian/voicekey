@@ -136,11 +136,25 @@ export interface HotkeyConfig {
   translateKey: string
 }
 
+/**
+ * Work-area edge a drop snapped ("docked") to. Reported by Rust
+ * `set_overlay_position` and persisted as `app.overlayDocked`, so the value
+ * survives a restart.
+ */
+export type OverlayEdge = 'left' | 'right' | 'top' | 'bottom'
+
 export interface AppPreferences {
   language: LanguageSetting
   autoLaunch?: boolean
   /** Whether the always-on HUD capsule is visible. Owned by the tray toggle. */
   overlayVisible?: boolean
+  /**
+   * Work-area edge the capsule is currently docked to, or `null` when it is
+   * not docked. Owned by Rust `set_overlay_position` (written on every persist
+   * / reset); the overlay renderer reads it once on mount to pick the compact
+   * idle-capsule shape after a restart.
+   */
+  overlayDocked?: OverlayEdge | null
 }
 
 export interface LanguageSnapshot {

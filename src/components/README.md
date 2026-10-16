@@ -31,9 +31,9 @@ React 组件目录，包含应用级组件与 `ui/` 组件库。
 
 ### `HUD.tsx`
 
-overlay 窗口的紧凑状态胶囊（无边框透明窗口，由主进程定位到光标所在屏幕的工作区底部居中、任务栏上方约 48px 处；位置可被用户拖拽改变并由 Rust 持久化）。**窗口几何恒定**：overlay 窗口常驻 `tauri.conf.json` 的 280×64，**不再随状态缩放**——0.5.3 起彻底移除 renderer 的 `setOverlaySize` / 内容测量 / `scheduleOverlayResize` 路径（状态机也不再发出任何 resize 命令），因为「会话 / 手势进行中改变窗口尺寸」会在 WebView2 上打断指针手势（详见下文根因）。所有状态的内容尺寸都装得下 280×64（idle ≈104×36；recording / processing / success / error = 268×52），胶囊居中于窗口、不被裁切。**按下热区挂在整窗容器上**（外层 `fixed inset-0` 的容器带 `pointer-events-auto` 并承载 `pointerdown` / `dblclick` / `contextmenu`），待机胶囊 `<button>` 只作视觉主体。**手势后续（move / up / cancel / blur）一律由 window 级监听器驱动状态机**，容器不再直接承载 `pointerup` / `pointercancel`。鼠标事件语义：所有状态保持可点击（`set_ignore_mouse_events(false)`，不做穿透）——Tauri `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，hover 穿透会让 `mouseenter` 不再可达（取消按钮将永久点不到），故不做 hover 穿透切换。胶囊为常驻待机启动器：启动后一直显示，状态机 idle → recording → processing → success/error → 回 idle（会话结束不再隐藏，仅托盘「显示悬浮胶囊」可隐藏）。待机胶囊**不设 `title`**（避免悬停弹出原生 tooltip），仅保留 `aria-label`；结果 / 处理文案与取消按钮的 `title` 保留。
+overlay 窗口的待机胶囊（无边框透明窗口，由主进程定位到光标所在屏幕的工作区底部居中、任务栏上方约 48px 处；位置可被用户拖拽改变并由 Rust 持久化）。**0.5.6 解耦**：录音 / 处理 / 成功 / 错误的会话态视觉与取消按钮已拆出到独立的 `SessionHUD.tsx`（下方居中的 `session` 窗口）——本组件**只渲染待机（idle）胶囊**，但仍完整订阅 `overlay-update` / `audio-level`：`statusRef` 供状态机裁决点按语义（latch 停止），音频电平供 latched 静音自动停止判定，会话离开录音态时复位 latch 标记。hold 手势在途时待机胶囊**保持原形态、原位不动**（大胶囊在 session 窗下方居中，两窗同显）。**窗口几何恒定**：overlay 窗口常驻 `tauri.conf.json` 的 280×64，**不随状态缩放**——0.5.3 起彻底移除 renderer 的 `setOverlaySize` / 内容测量 / `scheduleOverlayResize` 路径（状态机也不再发出任何 resize 命令），因为「会话 / 手势进行中改变窗口尺寸」会在 WebView2 上打断指针手势（详见下文根因）。待机胶囊尺寸（≈104×36，贴边紧凑 32×32）居中于窗口、不被裁切。**按下热区挂在整窗容器上**（外层 `fixed inset-0` 的容器带 `pointer-events-auto` 并承载 `pointerdown` / `dblclick` / `contextmenu`），待机胶囊 `<button>` 只作视觉主体。**手势后续（move / up / cancel / blur）一律由 window 级监听器驱动状态机**，容器不再直接承载 `pointerup` / `pointercancel`。鼠标事件语义：整窗可点击（`set_ignore_mouse_events(false)`，不做穿透）——Tauri `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，hover 穿透会让 `mouseenter` 不再可达，故不做 hover 穿透切换。胶囊为常驻待机启动器：启动后一直显示；状态机 idle →（session 窗显示会话态）→ 回 idle（会话结束本窗始终待机形态，仅托盘「显示悬浮胶囊」可隐藏本窗）。待机胶囊**不设 `title`**（避免悬停弹出原生 tooltip），仅保留 `aria-label`。
 
-**待机态（idle）交互（0.5.3 重设计，用户拍板）**：小尺寸低调胶囊（36px 高，小圆麦克风 + 「按住说话」）。**指针按下不再立即开录**——`pointerdown` 只开始一次「手势」，等手势歧义消除后才决定动作：
+**待机态（idle）交互（0.5.3 重设计，用户拍板）**：小尺寸低调胶囊（36px 高，小圆麦克风 + 「按住说话」；**贴边吸附时收缩为仅图标的 32×32 紧凑圆形（贴齐屏幕边），见下方「贴边紧凑形态」**）。**指针按下不再立即开录**——`pointerdown` 只开始一次「手势」，等手势歧义消除后才决定动作：
 
 - **轻点 = 切换（latch）**：短按（松开早于 `HOLD_LATCH_MAX_MS = 500ms`、位移未超 `DRAG_THRESHOLD_PX = 8`）→ 松手时发出 `start-session` 但**不 stop**：胶囊进入持续录音态，说完**再点一下**（此时 overlay status 为 `recording` 且状态机 `latched === true`）→ `stop-session` 正常识别。状态机只多记一个 `latched` 标志（前后端会话状态仍以 Rust `status` 为准）。
 - **按住 = PTT 保留**：按下停留满 `HOLD_LATCH_MAX_MS` 且未拖拽 → 进入 `holding` 并 `start-session`，松手 `stop-session`。
@@ -46,14 +46,21 @@ overlay 窗口的紧凑状态胶囊（无边框透明窗口，由主进程定位
 - 使用 `core:window:allow-outer-position` / `allow-set-position` / `allow-scale-factor` 读取窗口物理坐标、显示器缩放因子，并实时更新窗口位置；`pointerup` 后把最终坐标经 `setOverlayPosition` 交给 Rust 做贴边吸附、工作区钳制与持久化。persist 时**一次性只读测量**胶囊布局盒（`capsuleBoxRef` 的 `offsetWidth/offsetHeight`，逻辑像素）随坐标带给 Rust：吸附为**半隐半现（抽屉式）**——胶囊中线压在屏幕边、一半嵌入屏幕、一半露出（磁性阈值 48 物理像素），而不是按 280×64 窗口外框（否则待机胶囊吸附后会离屏幕边 ~(280-104)/2 ≈ 88px）。测量仅在手势结束后进行，不触发 resize / 重绘回路，不违反手势/会话期几何不变量。
 - **防 pointerup 丢失**：`pointerdown` 时通过 `setPointerCapture(pointerId)` 把指针事件锁定到根容器；同时挂载 window 级别的 `pointermove` / `pointerup` / `pointercancel` / `blur` 监听器作为唯一的手势后续通道，并配**看门狗定时器**（仅 `pending` / `dragging` 状态 N 秒无事件则强制复位），确保异常路径不会把状态卡在 `dragging`。
 - 选择位移阈值而非专用抓取区，是为了不缩减 PTT 热区、不在胶囊上增加额外装饰，且与系统常见拖拽判定一致。
-- 拖拽释放后 Rust 会吸附到屏幕边缘；胶囊本身用 CSS `transition-[opacity,transform,filter]` 保持入场/按压缩放动效，吸附动画由窗口位置变化呈现。
+- 拖拽释放后 Rust 会吸附到屏幕边缘；胶囊本身用 CSS `transition-[opacity,transform,translate,…]` 保持入场/按压缩放动效，吸附动画由窗口位置变化呈现。
+- **贴边紧凑形态（0.5.5 追加；用户两轮拍板：①「吸到屏幕边缘时不显示『按住说话』，只显示麦克风图标」；②**图标必须完整在屏内、屏幕边缘刚好托住图标，不得切半**）**：`docked && status === 'idle'` 时待机胶囊收成 **32×32 圆形、仅麦克风图标**（`DOCK_COMPACT_PX = 32`；按钮 `h-8 max-w-[32px] px-1.5 gap-0`，图标 chip 沿用 `h-5 w-5 rounded-full bg-white/10`、两侧各内缩 6px；文字 `min-w-0 max-w-0 opacity-0` **仅视觉隐藏**——`aria-label` 始终提供可访问名称、读屏仍可读文本）。**为何是 32 不是 36**：0.5.4 中线落点使吸附后**窗口中线 = 屏幕边**，屏内可见半区 = 窗口一半——左右 280/2 = 140px 充裕，**上下只有 64/2 = 32px**，故紧凑高度取 32（36 会被上/下贴边裁 4px，乘 DPI 更多）。**贴齐位移（本轮新增）**：按 `dockEdge` 叠加 `DOCK_TRANSLATE`（`overlayDrag.ts` 静态类：left → `translate-x-4`、right → `-translate-x-4`、top → `translate-y-4`、bottom → `-translate-y-4`，±16px = 边长/2），把胶囊**外缘正好压到窗口中线（= 屏幕边）**，整只胶囊连同图标完全落入可见半区，屏幕边缘刚好托住图标；图标距屏幕边恒 6px（≥4px 安全余量，DPI 次像素舍入最多把胶囊外推 1–2 物理像素也切不到图标）。位移类必须排在入场 `translate-y-*` **之后**（twMerge 保留最后写法，贴边位移优先），且**只加在待机 `<button>`**——会话胶囊 268×52 不参与（否则贴边位移会让其溢出 280 窗口被裁）。`dockEdge` 的两个来源：① 挂载时 `getConfig()` 读 `app.overlayDocked`（Rust 持久化，跨重启同时恢复形态与贴齐边）；② `setOverlayPosition` 的返回值（四边 = 已吸附、`null` = 超阈值仅钳制 / 复位），两处都收敛到纯函数 `isOverlayEdge`（脏值一律按「未吸附」处理）。**拖拽一进入 dragging 立即还原全形并归零位移**（即时「已拖出」反馈，同时保证松手 persist 量到的是全形胶囊尺寸），persist 返回值再定夺是否重新收缩 + 贴齐；双击复位返回 `null` → 还原全形、无残留位移。形态过渡走 `transition-[…,translate,…,height]` + `duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]`：v4 的位移是**独立 `translate` 属性**（非 `transform`，不显式列入 transition 就瞬跳）、h-9 → h-8 是显式 px 可直接插值；宽度 `width: auto` 不可插值，故由 padding / gap / 文字 `max-width` 连续驱动（≈104px ↔ 32px 平滑收放）。四边可见性推演（轴向 / 符号 / 16px / 图标 6px 余量 / 不越窗口矩形）由 `overlayDrag.test.ts` 的 `docked compact capsule flush placement` 组锁定。**只改胶囊自身 DOM 与 transform、窗口常驻 280×64 不变、不产生任何 `set_overlay_size` 类调用**，Rust 落点契约（0.5.4 半隐中线）**零改动**，与手势/会话期几何不变量无冲突（形态与位移切换全部发生在手势结束 persist 之后，或 dragging 判定后的纯视觉还原）。
 - **双击复位保留**：第 1 击 latch 启动会话；第 2 击（`DOUBLE_CLICK_MAX_MS` 内、距上次轻点位移 ≤ `TAP_DISTANCE_PX`）走 `cancel-session`（静默，不出空录音报错），随后 `dblclick` 调用 `onDoubleClick` → `setOverlayPosition(null, null)`，Rust 恢复底部居中默认位——正好是「点错了撤销」。`lastTap` 在每次轻点 `pointerup` 记录并**跨下一次 `pointerdown` 保留**；dblclick 的门禁**不用 status**（第 2 击时 overlay 可能仍是 `recording`），而以 `onDoubleClick` 对 `lastTap` 的时效检查为准（PTT 按住不会留下新鲜 `lastTap`，故不会被误复位）。
 - **latched 会话豁免误杀**：`onPointerCancel` / `onWindowBlur` / `onWatchdog` 的 `cancel-session` 只作用于「指针仍按下」的活跃 `pending` / `holding` / `dragging`；已松手的 latch 会话 phase 恒为 `idle`，上述路径对其早退。故点其他应用、窗口失焦或看门狗都不会误杀 latch 录音。`holding` 期间若指针被系统取消则 `stop-session`（保存音频而非丢弃）。
 - **静音自动停止**：仅对 latched（已松手）会话生效——renderer 借 AudioRecorder 持续上报的音频电平（`onAudioLevel`）刷新「最后说话时刻」，静音超 `SILENCE_AUTO_STOP_MS = 5000ms` 自动 `stop-session`；PTT 按住不受影响。判定为 `overlayDrag.ts` 的纯函数 `isSilenceAutoStopDue`。
 
-**录音 / 处理态**：268×52 深色玻璃胶囊 + 大圆角，状态只用左侧 28px 圆章的小面积色彩语义——录音为琥珀主色麦克风圆章（随音量呼吸 + 涟漪，无流式文本时右侧配迷你波形），处理为阶段色转圈包住阶段图标，成功为绿勾，错误为红叉；文字始终单行截断（`title` 提示全文），取消按钮仅在录音/处理态显示。**latched 录音仍可拖拽移窗**（录音继续）；在 latched 录音上轻点胶囊本体即停止识别。流式识别时实时文本尾部弱化 + 流光光标（录音与转写处理中均显示，尾部切分按 Unicode 码点）；配色为固定深色方案，不依赖明暗主题。
+**录音 / 处理态（0.5.6 起渲染在 `SessionHUD.tsx` / session 窗，见该条目）**：latched 录音期间待机胶囊仍可拖拽移窗（录音继续，大胶囊在下方居中不动）；在 latched 录音期间轻点待机胶囊本体即停止识别（结果展示在 session 窗）。
 
-**视觉描边**：待机与录音 / 处理胶囊本体已去除 `border border-white/10` 矩形描边，改为极淡的 `ring-1 ring-white/[0.06]` 配合原有阴影，在浅色背景下维持轮廓但不再呈现明显矩形边框。状态圆章（ProcessingBadge / SuccessBadge / ErrorBadge）内部的 ring / border 保留，用于小面积语义区分。
+**视觉描边**：待机胶囊本体已去除 `border border-white/10` 矩形描边，改为极淡的 `ring-1 ring-white/[0.06]` 配合原有阴影，在浅色背景下维持轮廓但不再呈现明显矩形边框。会话胶囊与其状态圆章（ProcessingBadge / SuccessBadge / ErrorBadge）的 ring / border 保留，用于小面积语义区分。
+
+### `SessionHUD.tsx`
+
+`session` 窗口（`App.tsx` 按 window label 路由）的**会话态胶囊**：0.5.6 与 overlay 待机胶囊解耦，固定渲染在屏幕下方居中的独立透明窗口里。承载录音（268×52 深色玻璃胶囊：琥珀麦克风呼吸圆章 + 无流式文本时的迷你波形 / 流式文本单行截断 + 尾部弱化 + 流光光标）、处理（阶段色转圈圆章：转写 / 精修 / 翻译）、成功（绿勾 + 转写预览）、错误（红叉 + 错误文案）与取消按钮——视觉 / 交互与拆分前 overlay 会话态胶囊逐像素一致（样式类原样迁移）。
+
+窗口生命周期权威在 Rust：`commands::session_show` 在每次会话启动时（键盘 PTT / 鼠标中键 / hold / latch 皆经 `start_session_internal`）把本窗定位到**光标所在监视器工作区底部居中**并显示（与 overlay 显隐、拖拽位置完全无关）；回到 idle（成功 / 错误展示 1.2s 超时、取消、误触静默）由 `commands::overlay_emit_idle` 唯一收口隐藏。翻译快捷键的成败反馈也点亮本窗（`translate.rs::emit_overlay` → `session_show_for_feedback`），会话进行中自动跳过（不重锚定）。事件与 overlay 同源：`app.emit` 广播的 `overlay-update` / `audio-level` 各窗各听。本组件**只渲染、不开关窗口**：收到 `idle` 渲染 `null`（隐藏前最后一帧透明无闪烁）。托盘「显示 / 隐藏悬浮胶囊」只作用于 overlay，绝不隐藏本窗；hold 手势在途时两窗同显（手指下待机胶囊不动，大胶囊下方居中）。
 
 **顶部细条关闭问题排查**：HUD.tsx 中没有任何关闭 / 隐藏 overlay 窗口的前端调用；可能触发会话结束的路径（`handleHoldEnd`、`handleCancel`）均不会隐藏窗口。原胶囊顶部的「细条」最可能是 CSS `border-white/10` 与透明窗口 / DWM 边框共同造成的视觉工件；移除胶囊边框后该视觉条应消失。若移除后点击胶囊顶部仍会关闭悬浮窗，则根因在 Rust / DWM 侧（`windowing.rs` 的 `suppress_focus_frame` 或窗口阴影处理），需由 Rust 侧继续排查。
 
@@ -69,7 +76,7 @@ overlay 窗口的紧凑状态胶囊（无边框透明窗口，由主进程定位
 
 ### `Waveform.tsx`
 
-根据实时音频电平渲染波形动画（HUD 录音浮窗使用）：每根柱子采样略有延迟的历史电平形成行波，配合钟形包络与缓动跟随，静止时有轻微呼吸感。
+根据实时音频电平渲染波形动画（session 窗录音胶囊 `SessionHUD` 使用）：每根柱子采样略有延迟的历史电平形成行波，配合钟形包络与缓动跟随，静止时有轻微呼吸感。
 
 ### `VoiceWave.tsx`
 

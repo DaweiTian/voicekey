@@ -7,12 +7,14 @@ import {
 } from 'react'
 import { getCurrentWindow, type Window as TauriWindow } from '@tauri-apps/api/window'
 import { PhysicalPosition } from '@tauri-apps/api/dpi'
-import { AudioLines, Check, Globe, Mic, Sparkles, X } from 'lucide-react'
+import { Mic } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { OverlayProcessingStage, OverlayState, OverlayStatus } from '@/shared/types'
+import type { OverlayEdge, OverlayState, OverlayStatus } from '@/shared/types'
 import { cn } from '../lib/utils'
 import {
+  DOCK_TRANSLATE,
   initialOverlayDragState,
+  isOverlayEdge,
   isSilenceAutoStopDue,
   onDoubleClick,
   onHoldTimer,
@@ -28,118 +30,22 @@ import {
   type OverlayDragState,
   type PhysicalPoint,
 } from '../lib/overlayDrag'
-import { Waveform } from './Waveform'
-
-/**
- * 各处理阶段的小面积语义色：只作用于转圈描边与阶段图标，
- * 胶囊底色在所有状态下保持统一的深色玻璃。
- */
-const STAGE_META: Record<
-  OverlayProcessingStage,
-  {
-    icon: typeof AudioLines
-    iconColor: string
-    spinnerTop: string
-    spinnerBottom: string
-  }
-> = {
-  transcribing: {
-    icon: AudioLines,
-    iconColor: 'text-indigo-300',
-    spinnerTop: 'border-t-indigo-400',
-    spinnerBottom: 'border-b-indigo-500/25',
-  },
-  refining: {
-    icon: Sparkles,
-    iconColor: 'text-violet-300',
-    spinnerTop: 'border-t-violet-400',
-    spinnerBottom: 'border-b-violet-500/25',
-  },
-  translating: {
-    icon: Globe,
-    iconColor: 'text-cyan-300',
-    spinnerTop: 'border-t-cyan-400',
-    spinnerBottom: 'border-b-cyan-500/25',
-  },
-}
-
-function getProcessingTitle(
-  stage: OverlayProcessingStage | undefined,
-  t: (key: string) => string,
-): string {
-  switch (stage) {
-    case 'transcribing':
-      return t('hud.transcribing')
-    case 'refining':
-      return t('hud.refining')
-    case 'translating':
-      return t('hud.translating')
-    default:
-      return t('hud.thinking')
-  }
-}
-
-/** 录音：琥珀色麦克风圆章，随音量呼吸缩放 + 外圈涟漪 */
-function RecordingBadge({ audioLevel }: { audioLevel: number }) {
-  const scale = 1 + Math.min(Math.max(audioLevel, 0), 1) * 0.14
-  return (
-    <span className="relative flex h-7 w-7 shrink-0 items-center justify-center">
-      <span className="absolute inset-0 animate-ping rounded-full bg-primary/25 [animation-duration:2s]" />
-      <span
-        className="relative flex h-7 w-7 items-center justify-center rounded-full bg-primary text-primary-foreground"
-        style={{
-          transform: `scale(${scale})`,
-          boxShadow: '0 0 14px -4px color-mix(in oklch, var(--primary) 75%, transparent)',
-        }}
-      >
-        <Mic className="h-3.5 w-3.5" strokeWidth={2.4} />
-      </span>
-    </span>
-  )
-}
-
-/** 处理中：细环转圈（阶段色）包住阶段小图标 */
-function ProcessingBadge({ stage }: { stage: OverlayProcessingStage | undefined }) {
-  const meta = stage ? STAGE_META[stage] : null
-  const Icon = meta?.icon ?? AudioLines
-  return (
-    <span className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/5">
-      <span
-        className={cn(
-          'absolute inset-[2px] animate-spin rounded-full border-2 border-l-transparent border-r-transparent [animation-duration:1.1s]',
-          meta
-            ? [meta.spinnerTop, meta.spinnerBottom]
-            : 'border-t-indigo-400 border-b-indigo-500/25',
-        )}
-      />
-      <Icon className={cn('h-3 w-3', meta?.iconColor ?? 'text-indigo-300')} />
-    </span>
-  )
-}
-
-/** 成功：绿色小勾圆章 */
-function SuccessBadge() {
-  return (
-    <span className="hud-pop flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-400/12 text-emerald-400 ring-1 ring-emerald-400/30 ring-inset">
-      <Check className="h-3.5 w-3.5" strokeWidth={3} />
-    </span>
-  )
-}
-
-/** 错误：红色小叉圆章 */
-function ErrorBadge() {
-  return (
-    <span className="hud-pop flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-red-500/12 text-red-400 ring-1 ring-red-400/30 ring-inset">
-      <X className="h-3.5 w-3.5" strokeWidth={2.5} />
-    </span>
-  )
-}
 
 export function HUD() {
   const { t } = useTranslation()
   const [overlayState, setOverlayState] = useState<OverlayState>({ status: 'idle' })
-  const [audioLevel, setAudioLevel] = useState(0)
   const [isVisible, setIsVisible] = useState(false)
+  /**
+   * 贴边吸附（docked）的**边**：`null` = 未吸附（待机胶囊全形：图标 + `holdToTalk`），
+   * `'left' | 'right' | 'top' | 'bottom'` = 已吸附（紧凑形态：仅图标，且按边贴齐屏幕
+   * 中线，整只落在屏内）。两个来源：
+   * ① 挂载时读持久化配置 `app.overlayDocked`（重启后仍保持贴边形态）；
+   * ② 每次 `setOverlayPosition` 的返回值（拖拽松手 persist / 双击复位）。
+   * 只改胶囊自身 DOM 形态与 transform——窗口常驻 280×64，绝不触碰窗口几何。
+   */
+  const [dockEdge, setDockEdge] = useState<OverlayEdge | null>(null)
+  /** 紧凑形态开关（待机胶囊渲染用）。 */
+  const docked = dockEdge !== null
 
   // RAF cleanup ref
   const rafIdRef = useRef<number | null>(null)
@@ -207,6 +113,12 @@ export function HUD() {
     if (nextState.latched && !wasLatched) {
       lastVoiceAtRef.current = Date.now()
     }
+    // 拖拽一经判定（进入 dragging）立即还原全形：给「已拖出吸附」的即时视觉反馈，
+    // 也保证松手 persist 测到的是全形胶囊尺寸（与 Rust 吸附口径一致）。只切胶囊 DOM
+    // 分支与贴边位移（transform 归零自然过渡回居中）、不改窗口几何（常驻 280×64），
+    // 不触发 setOverlaySize 类调用，与手势期几何不变量无冲突；松手 persist 的返回值
+    // 随后重新定夺 dockEdge（贴回边 → 再收缩 + 再贴齐）。
+    if (nextState.phase === 'dragging') setDockEdge(null)
     executeDragCommandsRef.current(cmds)
   }
 
@@ -231,6 +143,30 @@ export function HUD() {
     }
   }, [])
 
+  /**
+   * 启动时恢复贴边状态：读 `app.overlayDocked`（Rust 在每次 persist / 复位时写入），
+   * 让重启后的胶囊直接以紧凑形态出现，而不是先展开再等下一次拖拽。读取是纯异步的
+   * 一次状态赋值，失败静默保持默认全形；形态过渡只发生在胶囊自身（窗口几何不变，
+   * Rust 侧 `position_overlay_persisted` 同时按原坐标复位窗口）。
+   */
+  useEffect(() => {
+    let cancelled = false
+    window.electronAPI
+      .getConfig()
+      .then((config) => {
+        if (!cancelled) {
+          const stored = config.app.overlayDocked
+          setDockEdge(isOverlayEdge(stored) ? stored : null)
+        }
+      })
+      .catch(() => {
+        // 配置读取失败不阻塞 HUD：保持全形，下一次拖拽 persist 会纠正
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   useEffect(() => {
     const removeOverlayUpdateListener = window.electronAPI.onOverlayUpdate(
       (state: OverlayState) => {
@@ -239,8 +175,8 @@ export function HUD() {
     )
 
     const removeAudioLevelListener = window.electronAPI.onAudioLevel((level: number) => {
-      setAudioLevel(level)
-      // 只要有可闻声音就刷新「最后说话时刻」；静音自动停止据此判定。
+      // 0.5.6 起波形 / 呼吸圆章移至 session 窗（SessionHUD）：本窗不再渲染电平，
+      // 只保留「只要有可闻声音就刷新最后说话时刻」——静音自动停止据此判定。
       if (level >= SILENCE_LEVEL_THRESHOLD) {
         lastVoiceAtRef.current = Date.now()
       }
@@ -262,12 +198,12 @@ export function HUD() {
       latchedRef.current = false
       dragRef.current = { ...dragRef.current, latched: false, startedLatched: false }
     }
-    // 窗口常驻 tauri.conf.json 的 280×64（任何状态都装得下），不再随状态缩放——这是
-    // 「手势 / 会话期间窗口几何不可变」硬不变量的实现基础（见 overlayDrag.ts 模块头
-    // REGRESSION WARNING）。整窗即胶囊热区、无死区，所有状态保持可点击（待机 = 点按切换 /
-    // 按住说话 / 拖拽，录音 / 处理 = 取消按钮）。不做 hover 穿透：Tauri
-    // `set_ignore_cursor_events` 只有 bool、无 Electron 式 forward 转发，一旦穿透
-    // mouseenter 不再可达，胶囊（含取消按钮）会永久点不到。
+    // 窗口常驻 tauri.conf.json 的 280×64，不随状态缩放——「手势 / 会话期间窗口几何
+    // 不可变」硬不变量的实现基础（见 overlayDrag.ts 模块头 REGRESSION WARNING）。
+    // 0.5.6 解耦后本窗只渲染待机胶囊（点按切换 / 按住说话 / 拖拽），会话态大胶囊
+    // 移至独立 session 窗（SessionHUD）；整窗仍是胶囊热区、无死区、始终可点击。
+    // 不做 hover 穿透：Tauri `set_ignore_cursor_events` 只有 bool、无 Electron 式
+    // forward 转发，一旦穿透 mouseenter 不再可达，胶囊会永久点不到。
     window.electronAPI.setIgnoreMouseEvents(false)
   }, [overlayState.status])
 
@@ -392,12 +328,15 @@ export function HUD() {
   }
 
   /**
-   * 把当前窗口物理坐标持久化到 Rust（贴边吸附 / 工作区钳制由 Rust 完成）。
+   * 把当前窗口物理坐标持久化到 Rust（贴边吸附 / 工作区钳制由 Rust 完成），并用返回值
+   * 更新 docked：`'left' | 'right' | 'top' | 'bottom'` = 本次落位吸附贴边（胶囊收缩成
+   * 紧凑形态），`null` = 超磁性阈值仅钳制落位（保持全形）。
    *
    * 随坐标带上**可见胶囊**的实际尺寸（逻辑 px）：吸附数学在 Rust，而胶囊在 280×64 窗口内
    * 居中——不带尺寸时 Rust 只能按窗口外框贴边，待机胶囊会离屏幕边 ~(280-104)/2 ≈ 88px。
    * 测量时机是「拖拽松手之后」（persist-position 命令），只读 offsetWidth/offsetHeight
-   * 一次性读取布局尺寸，绝不触发 resize / 重绘回路，与手势期几何不变量无冲突。
+   * 一次性读取布局尺寸，绝不触发 resize / 重绘回路，与手势期几何不变量无冲突；此时手势
+   * 已结束、胶囊早已还原全形，量到的正是全形尺寸。
    */
   const persistDragPosition = useCallback(async () => {
     try {
@@ -408,7 +347,8 @@ export function HUD() {
           : undefined
       const win = getOverlayWindow()
       const pos = await win.outerPosition()
-      await window.electronAPI.setOverlayPosition(pos.x, pos.y, capsule)
+      const edge = await window.electronAPI.setOverlayPosition(pos.x, pos.y, capsule)
+      setDockEdge(isOverlayEdge(edge) ? edge : null)
     } catch {
       // 持久化失败不阻塞 UI，下次拖拽会重试
     }
@@ -490,7 +430,12 @@ export function HUD() {
           handleCancel()
           break
         case 'set-overlay-position':
-          window.electronAPI.setOverlayPosition(cmd.x, cmd.y).catch(() => {})
+          // 双击复位（x/y 均为 null）：Rust 返回 null → docked=false、胶囊回到全形。
+          // 统一按返回值消费而不是直接写 false，未来若该命令携带其它坐标仍正确。
+          window.electronAPI
+            .setOverlayPosition(cmd.x, cmd.y)
+            .then((edge) => setDockEdge(isOverlayEdge(edge) ? edge : null))
+            .catch(() => {})
           break
         case 'release-pointer-capture':
           releasePointerCapture(cmd.pointerId)
@@ -586,19 +531,6 @@ export function HUD() {
     applyDragResult(nextState, cmds)
   }
 
-  const { status, message, processingStage, transcript = '' } = overlayState
-  const transcriptCharacters = Array.from(transcript)
-  const unstableTailLength =
-    status === 'recording' || status === 'processing' ? Math.min(6, transcriptCharacters.length) : 0
-  const stableTranscript = transcriptCharacters
-    .slice(0, transcriptCharacters.length - unstableTailLength)
-    .join('')
-  const unstableTranscript = transcriptCharacters.slice(-unstableTailLength).join('')
-
-  // 取消按钮只在会话进行中（录音 / 处理）有意义；成功与错误态把宽度让给文案。
-  const showCancel = status === 'recording' || status === 'processing'
-  const textClass = 'min-w-0 flex-1 truncate text-[13px] leading-4 text-neutral-100'
-
   return (
     <div
       ref={rootRef}
@@ -607,118 +539,55 @@ export function HUD() {
       onDoubleClick={handleIdleDoubleClick}
       onContextMenu={(event) => event.preventDefault()}
     >
-      {/* 布局容器：窗口常驻 280×64，胶囊居中于窗口（不再随状态缩放窗口）。
-          同时是 persist-position 的胶囊尺寸测量盒（shrink-wrap = 胶囊实际尺寸）。 */}
+      {/* 布局容器：窗口常驻 280×64，待机胶囊居中于窗口。同时是 persist-position
+          的胶囊尺寸测量盒（shrink-wrap = 胶囊实际尺寸）。0.5.6 解耦后本窗恒渲染
+          待机胶囊——hold 手势在途时也如此（大胶囊在下方居中的 session 窗，本胶囊
+          在手指下原位不动，两窗同显）。 */}
       <div ref={capsuleBoxRef} className="flex shrink-0">
-        {status === 'idle' ? (
-          // 待机态：小尺寸低调胶囊。仅作视觉主体，pointerdown / dblclick 等交互
-          // 统一挂在整窗容器上（见 handleIdlePointerDown 注释）。不设 title，
-          // 避免悬停弹出原生 tooltip（aria-label 保留可访问性）。
-          <button
-            type="button"
+        {/* 待机胶囊：小尺寸低调形态。仅作视觉主体，pointerdown / dblclick 等交互
+            统一挂在整窗容器上（见 handleIdlePointerDown 注释）。不设 title，
+            避免悬停弹出原生 tooltip（aria-label 保留可访问性）。 */}
+        <button
+          type="button"
+          className={cn(
+            'pointer-events-auto flex select-none items-center rounded-full',
+            'bg-neutral-950/85 ring-1 ring-white/[0.06] touch-none',
+            // 形态过渡：`width: auto` 无法被 CSS 过渡插值，故宽度由可插值的
+            // padding / gap / 文字 max-width 连续驱动（≈104px ↔ 32px 平滑收放），
+            // 高度是显式类值（h-9 → h-8）可直接插值；v4 的位移走独立 `translate`
+            // 属性（不是 `transform`），必须显式列入 transition 才平滑贴齐 / 归零。
+            'transition-[opacity,transform,translate,filter,padding,gap,max-width,height] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-95',
+            // 紧凑 32×32（= 上/下吸附的可见半窗高 64/2，故上下贴边整只屏内）；
+            // 全形 h-9 ≈104×36，形态与原实现一致。
+            docked ? 'h-8 max-w-[32px] px-1.5 gap-0' : 'h-9 max-w-[240px] px-3.5 gap-2',
+            isVisible
+              ? 'translate-y-0 scale-100 opacity-100 blur-0'
+              : 'translate-y-2 scale-95 opacity-0 blur-sm',
+            // 贴边贴齐（±16px = 紧凑边长/2，把胶囊外缘正好压到窗口中线 = 屏幕边，
+            // 整只胶囊含图标 chip 完全落在屏内）。必须排在入场 translate **之后**：
+            // twMerge 保留最后写法，贴边位移优先于入场位移（二者同轴时）。
+            dockEdge ? DOCK_TRANSLATE[dockEdge] : '',
+          )}
+          aria-label={t('hud.holdToTalk')}
+        >
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/10 text-neutral-300">
+            <Mic className="h-3 w-3" />
+          </span>
+          {/* 贴边（docked）时文字收宽为 0 并淡出——仅视觉隐藏，随过渡平滑收放；
+                可访问名称始终由按钮 `aria-label` 提供，读屏仍能读到这段文本。 */}
+          <span
             className={cn(
-              'pointer-events-auto flex h-9 select-none items-center gap-2 rounded-full',
-              'bg-neutral-950/85 px-3.5 ring-1 ring-white/[0.06] touch-none',
-              'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-95',
-              isVisible
-                ? 'translate-y-0 scale-100 opacity-100 blur-0'
-                : 'translate-y-2 scale-95 opacity-0 blur-sm',
-            )}
-            aria-label={t('hud.holdToTalk')}
-          >
-            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/10 text-neutral-300">
-              <Mic className="h-3 w-3" />
-            </span>
-            <span className="text-xs font-medium text-neutral-200">{t('hud.holdToTalk')}</span>
-          </button>
-        ) : (
-          <div
-            className={cn(
-              'pointer-events-auto relative flex h-[52px] w-[268px] items-center gap-2.5 rounded-full',
-              'bg-neutral-950/90 px-3 ring-1 ring-white/[0.06]',
-              'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]',
-              isVisible
-                ? 'translate-y-0 scale-100 opacity-100 blur-0'
-                : 'translate-y-2 scale-95 opacity-0 blur-sm',
+              // min-w-0：flex item 的 `min-width: auto`（内容最小宽）会顶住 max-w-0，
+              // 显式清零才能让文字真正收到 0 宽；overflow-hidden 使其成为滚动容器、
+              // 不参与可见裁剪溢出。
+              'min-w-0 overflow-hidden whitespace-nowrap text-xs font-medium text-neutral-200',
+              'transition-[max-width,opacity] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]',
+              docked ? 'max-w-0 opacity-0' : 'max-w-[160px] opacity-100',
             )}
           >
-            {/* Left status badge */}
-            {status === 'recording' && <RecordingBadge audioLevel={audioLevel} />}
-            {status === 'processing' && <ProcessingBadge stage={processingStage} />}
-            {status === 'success' && <SuccessBadge />}
-            {status === 'error' && <ErrorBadge />}
-
-            {/* Single-line status text */}
-            {status === 'recording' &&
-              (transcript ? (
-                /* 流式识别：实时文本单行截断，尾部弱化 + 呼吸光标 */
-                <p className={cn(textClass, 'font-normal')} title={transcript}>
-                  <span>{stableTranscript}</span>
-                  <span className="text-neutral-500">{unstableTranscript}</span>
-                  <span className="hud-caret ml-[2px] inline-block h-[13px] w-[2px] translate-y-[2px] rounded-full bg-primary" />
-                </p>
-              ) : (
-                /* 无流式文本：状态词 + 迷你波形 */
-                <div className="flex min-w-0 flex-1 items-center justify-between gap-2">
-                  <span className="truncate text-[13px] font-medium text-neutral-200">
-                    {t('hud.listening')}
-                  </span>
-                  <Waveform
-                    audioLevel={audioLevel}
-                    barCount={7}
-                    className="h-4 w-[26px] shrink-0 gap-[2px]"
-                    barClassName="w-[2px] bg-linear-to-t from-primary/40 to-primary"
-                  />
-                </div>
-              ))}
-
-            {status === 'processing' &&
-              (transcript ? (
-                /* 流式识别增量：与录音分支同款单行截断 + 尾部弱化 + 光标 */
-                <p className={cn(textClass, 'font-normal')} title={transcript}>
-                  <span>{stableTranscript}</span>
-                  <span className="text-neutral-500">{unstableTranscript}</span>
-                  <span className="hud-caret ml-[2px] inline-block h-[13px] w-[2px] translate-y-[2px] rounded-full bg-primary" />
-                </p>
-              ) : (
-                <p
-                  className={cn(textClass, 'font-medium')}
-                  title={getProcessingTitle(processingStage, t)}
-                >
-                  {getProcessingTitle(processingStage, t)}
-                </p>
-              ))}
-
-            {status === 'success' && (
-              <p className={textClass} title={transcript || undefined}>
-                {transcript || t('hud.injected')}
-              </p>
-            )}
-
-            {status === 'error' && (
-              <p className={cn(textClass, 'text-neutral-200')} title={message}>
-                {message || t('hud.errorFallback')}
-              </p>
-            )}
-
-            {/* Cancel button */}
-            {showCancel && (
-              <button
-                type="button"
-                onClick={handleCancel}
-                /* 与按住说话互斥：取消按钮的按下 / 松开不得触发 start / stop */
-                onPointerDown={(event) => event.stopPropagation()}
-                onPointerUp={(event) => event.stopPropagation()}
-                onPointerCancel={(event) => event.stopPropagation()}
-                className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-full text-neutral-500 transition-colors duration-150 hover:bg-white/10 hover:text-neutral-200 active:scale-90"
-                title={t('hud.cancel')}
-                aria-label={t('hud.cancel')}
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
-          </div>
-        )}
+            {t('hud.holdToTalk')}
+          </span>
+        </button>
       </div>
     </div>
   )

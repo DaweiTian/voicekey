@@ -88,7 +88,10 @@ fn streaming_files() -> Vec<AsrFileMeta> {
 }
 
 pub fn classic_dir() -> PathBuf {
-    model_storage_dir().join("sensevoice").join("models").join("v1")
+    model_storage_dir()
+        .join("sensevoice")
+        .join("models")
+        .join("v1")
 }
 
 pub fn streaming_dir() -> PathBuf {
@@ -277,11 +280,7 @@ pub async fn transcribe_cloud(
 /// and reports whether new text arrived; `done` flips on `data: [DONE]`.
 /// `reasoning_content` deltas are deliberately ignored. Returns `Err` on a
 /// malformed `data:` payload so the caller can fall back to non-streaming.
-fn ingest_sse_line(
-    line: &[u8],
-    transcript: &mut String,
-    done: &mut bool,
-) -> Result<bool, String> {
+fn ingest_sse_line(line: &[u8], transcript: &mut String, done: &mut bool) -> Result<bool, String> {
     let line = String::from_utf8_lossy(line);
     let line = line.trim_end_matches(['\r', '\n']);
     if line.is_empty() || line.starts_with(':') {

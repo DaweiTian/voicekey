@@ -61,6 +61,14 @@ pub struct AppPreferences {
     /// `None` = bottom-center default. Written by `set_overlay_position`.
     #[serde(default)]
     pub overlay_position: Option<OverlayPosition>,
+    /// Work-area edge the capsule last **docked** to via the magnetic snap
+    /// (`"left"` / `"right"` / `"top"` / `"bottom"`); `None` = not docked
+    /// (also written on the reset branch). Persisted together with
+    /// `overlay_position` by `set_overlay_position` so a restart restores not
+    /// only *where* the capsule sits but *which shape* the renderer shows
+    /// there: a docked standby capsule renders compact (icon only).
+    #[serde(default)]
+    pub overlay_docked: Option<String>,
 }
 
 impl Default for AppPreferences {
@@ -70,6 +78,7 @@ impl Default for AppPreferences {
             auto_launch: false,
             overlay_visible: true,
             overlay_position: None,
+            overlay_docked: None,
         }
     }
 }
@@ -424,6 +433,19 @@ impl ConfigStore {
                         (x.is_finite() && y.is_finite()).then_some(OverlayPosition { x, y })
                     }) {
                         merged.app.overlay_position = Some(pos);
+                    }
+                }
+                // `overlayDocked`: `null` clears the dock (capsule renders the
+                // expanded standby shape); one of the four known work-area
+                // edges stores it; anything else is ignored so a malformed
+                // patch can never corrupt the stored dock state.
+                if let Some(v) = obj.get("overlayDocked") {
+                    if v.is_null() {
+                        merged.app.overlay_docked = None;
+                    } else if let Some(edge) = v.as_str() {
+                        if matches!(edge, "left" | "right" | "top" | "bottom") {
+                            merged.app.overlay_docked = Some(edge.to_string());
+                        }
                     }
                 }
             }
