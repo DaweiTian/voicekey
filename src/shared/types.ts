@@ -17,45 +17,12 @@ export interface ASRConfig {
   lowVolumeMode?: boolean
   microphoneDeviceId?: string
   microphoneDeviceLabel?: string
-  streamingEnabled?: boolean
-  /** `local` = offline models; `mimo` = MiMo cloud ASR. */
-  engine?: 'local' | 'mimo'
   /** MiMo ASR endpoint (optional; falls back to LLM MiMo endpoint). */
   mimoEndpoint?: string
   /** MiMo ASR API key (optional; falls back to LLM MiMo key). */
   mimoApiKey?: string
   /** MiMo ASR model id, default `mimo-v2.5-asr`. */
   mimoModel?: string
-}
-
-export type LocalASRDownloadPhase = 'model'
-
-export interface LocalASRDownloadProgress {
-  phase: LocalASRDownloadPhase
-  receivedBytes: number
-  totalBytes?: number
-  percent?: number
-}
-
-export interface LocalASRStatus {
-  supported: boolean
-  ready: boolean
-  downloading: boolean
-  modelName: string
-  installDir: string
-  storageDir: string
-  modelPath?: string
-  missing: string[]
-  downloadSizeBytes: number
-  progress?: LocalASRDownloadProgress
-  error?: string
-}
-
-export interface HostCapabilities {
-  available: boolean
-  logicalCpuCount: number
-  memoryBytes: number
-  meetsStreamingAsrRecommendation: boolean
 }
 
 export type LLMProvider =
@@ -275,16 +242,6 @@ export const IPC_CHANNELS = {
   CONFIG_SECRET_GET: 'config:secret:get',
   CONFIG_REFINE_TEST: 'config:refine:test',
   TOKENDANCE_AUTH_CONNECT: 'tokendance:auth:connect',
-  LOCAL_ASR_STATUS: 'local-asr:status',
-  LOCAL_ASR_DOWNLOAD: 'local-asr:download',
-  LOCAL_ASR_DELETE: 'local-asr:delete',
-  LOCAL_ASR_DOWNLOAD_PROGRESS: 'local-asr:download-progress',
-  STREAMING_ASR_STATUS: 'streaming-asr:status',
-  STREAMING_ASR_DOWNLOAD: 'streaming-asr:download',
-  STREAMING_ASR_DELETE: 'streaming-asr:delete',
-  STREAMING_ASR_DOWNLOAD_PROGRESS: 'streaming-asr:download-progress',
-  ASR_MODEL_DIRECTORY_OPEN: 'asr-model-directory:open',
-  HOST_CAPABILITIES_GET: 'host-capabilities:get',
   APP_LANGUAGE_GET: 'app:language:get',
   APP_LANGUAGE_CHANGED: 'app:language:changed',
   LINUX_INTEGRATION_STATUS: 'linux-integration:status',

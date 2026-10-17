@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.11](https://github.com/BuildWithAIs/voicekey/compare/v0.5.10...v0.5.11) (2026-10-17)
+
+### ⚠ BREAKING CHANGES
+
+- **asr:** 移除本地识别（SenseVoice / X-ASR）与全部模型下载/管理，**云端 MiMo（`mimo-v2.5-asr`）成为唯一识别引擎**。设置页的「识别引擎」「标准识别」「实时识别」卡片、本地模型目录入口，以及相关桥方法 / i18n 键一并删除。旧配置里的 `asr.engine` / `asr.streamingEnabled` 键被 serde 静默忽略，无需迁移。本地推理代码在 git 历史中保留，可随时找回。
+
+### Features
+
+- **asr:** 彻底精简为云端 only——删除 `src-tauri/src/asr.rs` 的模型清单/下载/校验/状态（`AsrFileMeta` / `AsrStatus` / `classic_files` / `streaming_files` / `classic_dir` / `streaming_dir` / `files_for` / `dir_for` / `verify_sha256` / `status` / `get_status` / `download` / `download_one` / `delete` 及模型 URL 表），`src-tauri/src/commands.rs` 的 `get_local_asr_status` / `download_local_asr` / `delete_local_asr` / `get_streaming_asr_status` / `download_streaming_asr` / `delete_streaming_asr` / `open_asr_model_directory` 命令与 `invoke_handler` 注册，`config.rs` 的 `engine` / `streaming_enabled` 字段与 `model_storage_dir()`，以及渲染层「识别引擎 / 本地模型 / 实时识别」UI、`tauri-api.ts` 桥方法、`LOCAL_ASR` / `STREAMING_ASR` 常量、`host-capabilities` 模块与相关类型 / i18n 键
+- **asr:** 移除本地识别后 `transcribe` 直接走云端（删去 `match config.asr.engine` 的 `"local"` 分支，保留 SSE 流式 + 非流式回退）；`transcribe_cloud` / `transcribe_cloud_stream` / `encode_wav_mono_f32` 与 MiMo 云端路径行为**零变化**，构建产物体积随依赖精简下降
+
 ## [0.5.10](https://github.com/BuildWithAIs/voicekey/compare/v0.5.9...v0.5.10) (2026-10-17)
 
 ### Bug Fixes

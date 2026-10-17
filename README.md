@@ -41,10 +41,10 @@ Zhiruo turns speech into text without changing the way you work. It stays in the
 starts recording only while you hold the push-to-talk key, and pastes the final text wherever your
 cursor is active.
 
-- **Local-first transcription** — raw audio is processed on your device with downloadable ONNX
-  models; no ASR API key is required.
-- **Two recognition modes** — choose compact SenseVoice final transcription or bilingual X-ASR
-  partial transcription with punctuation and English casing.
+- **Cloud transcription** — audio is transcribed by MiMo (`mimo-v2.5-asr`) through an
+  OpenAI-compatible endpoint; add your own API key in Settings.
+- **Streaming output** — the transcript appears in the HUD as the model generates it, with
+  model-native punctuation.
 - **Optional text cleanup** — connect OpenAI, DeepSeek, OpenRouter, or a custom OpenAI-compatible
   endpoint using your own API key.
 - **Translation in place** — translate selected text and replace it in the current application with
@@ -62,30 +62,24 @@ Hold the PTT hotkey
         ↓
 Capture microphone audio
         ↓
-Run local speech recognition
+Run MiMo cloud speech recognition
         ↓
 Optionally refine or translate the final text with your LLM provider
         ↓
 Insert the result into the focused application and save local history
 ```
 
-The Electron main process owns microphone sessions, model files, hotkeys, credentials, history,
-updates, and text injection. Speech recognition runs in worker threads so model inference does not
-block the application UI.
+The main process owns microphone sessions, hotkeys, credentials, history, updates, and text
+injection. Speech recognition runs in the cloud, so no model inference blocks the application UI.
 
-### Recognition modes
+### Recognition
 
-| Mode          | Local models         | Experience                                                                    | Approximate download |
-| ------------- | -------------------- | ----------------------------------------------------------------------------- | -------------------- |
-| **Classic**   | SenseVoiceSmall int8 | Transcribes after recording; best for a compact, simple setup                 | 240 MB               |
-| **Streaming** | X-ASR-zh-en 480 ms   | Shows bilingual partial text with model-native punctuation and English casing | 586 MB               |
-
-The modes are mutually exclusive. Model files are downloaded only when requested from Settings,
-stored under Electron's per-user application data directory, and verified against pinned file sizes
-and SHA-256 hashes. Before a Streaming model download, Zhiruo reads the two-letter country code
-for the current public connection without storing or logging its IP address. Mainland China prefers
-ModelScope, while the United States and other overseas connections prefer Hugging Face; either
-source remains available as a fallback.
+Transcription uses MiMo cloud ASR (`mimo-v2.5-asr`) over an OpenAI-compatible `chat/completions`
+endpoint. Configure the endpoint, model, and API key under **Settings → Speech Recognition**; when
+the endpoint is left empty it falls back to the MiMo connection configured for text refinement.
+Responses are streamed so partial text shows in the HUD while the model is still generating, and a
+non-streaming call is used as a fallback. Earlier releases offered downloadable on-device models
+(SenseVoice / X-ASR); that local path was removed in 0.5.11.
 
 ## Installation
 
@@ -102,7 +96,7 @@ Download the latest build from
 ### First run
 
 1. Open **Settings** and select a microphone.
-2. Download either the **Classic** or **Streaming** local recognition model.
+2. Enter your MiMo ASR API key (or reuse the MiMo key configured for text refinement).
 3. Optionally configure an LLM provider for transcript cleanup and translation.
 4. Focus any text field, hold the push-to-talk hotkey, speak, and release to insert the result.
 
@@ -167,17 +161,19 @@ running the supported Hyprland integration path.
 
 ## Privacy and data flow
 
-Local transcription does not upload microphone audio. Optional cloud features have a narrower,
-explicit scope:
+Speech recognition, transcript cleanup, and translation call configured cloud endpoints; nothing is
+inferred on your device. Each has an explicit scope:
 
+- **Speech recognition** uploads the recorded audio to the configured MiMo ASR endpoint and returns
+  the transcript.
 - **Transcript cleanup** sends the final recognized text—not the raw audio—to the configured LLM
   provider.
 - **Translation** sends the selected text to that provider and replaces the selection with the
   response.
-- **History and model files** remain in the application's local user-data directory.
-- **API keys** are managed by the Electron main process and are excluded from application logs.
+- **History** remains in the application's local user-data directory.
+- **API keys** are managed by the main process and are excluded from application logs.
 
-If you need a fully offline workflow, leave transcript cleanup and translation disabled.
+Leave transcript cleanup and translation disabled to keep only speech recognition on the network.
 
 ## Build from source
 

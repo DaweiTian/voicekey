@@ -104,11 +104,6 @@ pub struct ASRConfig {
     pub microphone_device_id: String,
     #[serde(default)]
     pub microphone_device_label: String,
-    #[serde(default)]
-    pub streaming_enabled: bool,
-    /// `local` = offline ONNX models; `mimo` = MiMo cloud ASR (mimo-v2.5-asr).
-    #[serde(default = "default_asr_engine")]
-    pub engine: String,
     /// MiMo ASR endpoint. Empty means fall back to LLM MiMo endpoint / default.
     #[serde(default)]
     pub mimo_endpoint: String,
@@ -128,18 +123,12 @@ fn default_true() -> bool {
     true
 }
 
-fn default_asr_engine() -> String {
-    "mimo".into()
-}
-
 impl Default for ASRConfig {
     fn default() -> Self {
         Self {
             low_volume_mode: true,
             microphone_device_id: String::new(),
             microphone_device_label: String::new(),
-            streaming_enabled: false,
-            engine: default_asr_engine(),
             mimo_endpoint: String::new(),
             mimo_api_key: String::new(),
             mimo_model: default_mimo_asr_model(),
@@ -316,12 +305,6 @@ pub fn stats_file() -> PathBuf {
 
 pub fn log_dir() -> PathBuf {
     let dir = config_dir().join("logs");
-    let _ = fs::create_dir_all(&dir);
-    dir
-}
-
-pub fn model_storage_dir() -> PathBuf {
-    let dir = config_dir().join("local-asr");
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -512,15 +495,6 @@ impl ConfigStore {
                 }
                 if let Some(v) = obj.get("microphoneDeviceLabel").and_then(|v| v.as_str()) {
                     merged.asr.microphone_device_label = v.chars().take(128).collect();
-                }
-                if let Some(v) = obj.get("streamingEnabled").and_then(|v| v.as_bool()) {
-                    merged.asr.streaming_enabled = v;
-                }
-                if let Some(v) = obj.get("engine").and_then(|v| v.as_str()) {
-                    let engine = v.to_string();
-                    if engine == "local" || engine == "mimo" {
-                        merged.asr.engine = engine;
-                    }
                 }
                 if let Some(v) = obj.get("mimoEndpoint").and_then(|v| v.as_str()) {
                     merged.asr.mimo_endpoint = v.chars().take(512).collect();

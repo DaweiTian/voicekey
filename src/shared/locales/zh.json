@@ -116,10 +116,8 @@
     "aboutHint": "保持更新以获得最佳体验",
     "health": {
       "asr": "语音识别",
-      "asrLocalReady": "标准识别就绪",
-      "asrLocalMissing": "标准识别未下载",
-      "asrStreamingReady": "实时识别就绪",
-      "asrStreamingMissing": "实时识别未下载",
+      "asrCloudReady": "MiMo 云端已配置",
+      "asrCloudMissing": "MiMo 云端未配置",
       "refine": "文本模型",
       "refineOn": "连接就绪",
       "refineOff": "未完成配置",
@@ -176,10 +174,6 @@
     "llmProvider": "模型 Provider",
     "llmProviderHelp": "当前请求端点：{{endpoint}}",
     "mimoModelHelp": "文本生成模型 ID，例如 mimo-v2.5。模型列表见 {{url}}。",
-    "asrEngine": "识别引擎",
-    "asrEngineMimo": "MiMo 云端",
-    "asrEngineLocal": "本地模型",
-    "asrEngineHelp": "云端识别开箱即用（mimo-v2.5-asr）；本地模型无需联网，但需先下载。",
     "asrMimoEndpointHelp": "默认 https://api.xiaomimimo.com/v1，可改为兼容网关。留空则使用下方默认值。",
     "asrMimoApiKeyPlaceholder": "输入 MiMo 语音识别 API Key",
     "asrMimoApiKeyHelp": "可与文本润色的 MiMo Key 相同；若此处留空，则回退使用润色模块里配置的 MiMo Key。",
@@ -245,49 +239,6 @@
       "permissionHelp": "需要麦克风权限才能显示设备名称。",
       "unsupported": "当前环境无法检测麦克风设备。",
       "detectFailed": "无法检测麦克风。"
-    },
-    "modelStorage": {
-      "open": "打开目录",
-      "openFailed": "无法打开模型目录：{{message}}",
-      "enable": "启用",
-      "selected": "已选用",
-      "delete": "删除模型",
-      "deleting": "正在删除..."
-    },
-    "localAsr": {
-      "title": "标准识别",
-      "help": "录音结束后开始识别，速度稍慢，准确率更高。",
-      "ready": "已就绪",
-      "download": "下载模型",
-      "downloading": "下载中...",
-      "downloadComplete": "标准识别已就绪",
-      "downloadFailed": "模型下载失败：{{message}}",
-      "downloadBeforeEnable": "请先下载标准识别模型；或改用「MiMo 云端识别」无需下载本地模型。",
-      "deleteConfirm": "确定删除标准识别模型吗？删除后再次使用需要重新下载。",
-      "deleteComplete": "标准识别模型已删除。",
-      "deleteFailed": "模型删除失败：{{message}}",
-      "unsupported": "当前平台暂不支持标准识别。",
-      "phase": {
-        "model": "正在下载模型"
-      }
-    },
-    "streamingAsr": {
-      "title": "实时识别",
-      "help": "流式输出，边说边识别，准确率略低。",
-      "downloadConfirmWeak": "这台电脑当前约 {{cpu}} 核、{{memory}} GB 内存，低于建议配置（6 核 CPU、16 GB 内存），使用时可能卡顿。仍要下载吗？",
-      "ready": "已就绪",
-      "download": "下载模型",
-      "downloading": "下载中...",
-      "downloadComplete": "实时识别已就绪",
-      "downloadFailed": "模型下载失败：{{message}}",
-      "downloadBeforeEnable": "请先下载实时识别模型（设置页「实时识别」卡片中的下载按钮，来源为 Hugging Face / ModelScope）；或改用「MiMo 云端识别」。",
-      "deleteConfirm": "确定删除实时识别模型吗？删除后将关闭实时识别，再次使用需要重新下载。",
-      "deleteComplete": "实时识别模型已删除。",
-      "deleteFailed": "模型删除失败：{{message}}",
-      "unsupported": "当前平台暂不支持实时识别。",
-      "phase": {
-        "model": "正在下载模型"
-      }
     },
     "languagePlaceholder": "选择语言",
     "languageChinese": "中文",

@@ -339,7 +339,11 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   load → mutate → save 全程持进程级 `CONFIG_LOCK`（与 `stats.rs` 的 `STATS_LOCK`
   同款），读也持锁防半截文件；overlay 重建工作线程、托盘/主线程、IPC 线程并发
   写不丢更新。锁内只做文件 I/O 与纯 JSON 合并、不嵌套其他锁（无锁序死锁风险）。
-- `src/asr.rs` / `src/audio.rs` / `src/inject.rs` / `src/llm.rs` /
+- `src/asr.rs` - 云端识别（MiMo，OpenAI 兼容 `mimo-v2.5-asr`）：非流式
+  `transcribe_cloud` + SSE 流式 `transcribe_cloud_stream`（HUD 边生成边显示），以及
+  audio 管线共用的 WAV 编码 `encode_wav_mono_f32`。**0.5.11 起本地识别（SenseVoice /
+  X-ASR）与模型下载/管理全部移除**，云端是唯一引擎。
+- `src/audio.rs` / `src/inject.rs` / `src/llm.rs` /
   `src/history.rs` / `src/platform.rs` / `src/state.rs` /
   `src/updater.rs` - 各子系统实现（详见各自文件头注释）。`audio.rs` 另含
   5 分钟会话上限常量 `SESSION_MAX_DURATION_SECONDS`（与渲染层常量同值）与

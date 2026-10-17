@@ -1000,7 +1000,7 @@ fn empty_session_is_quiet(elapsed_ms: u64, has_audio: bool) -> bool {
 /// Shared finalize path used by the stop command and PTT release.
 ///
 /// Wraps the fallible work so that *every* failure path (empty key, non-2xx
-/// HTTP, empty transcript, no audio, local engine not wired up) emits an
+/// HTTP, empty transcript, no audio) emits an
 /// `error` event, updates the HUD and resets the session state.
 pub async fn stop_session_internal<R: tauri::Runtime>(
     app: &AppHandle<R>,
@@ -1073,57 +1073,34 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
         (wav, duration_ms)
     };
 
-    // Transcribe
+    // Transcribe with MiMo cloud ASR (the only engine since 0.5.11).
     let raw_text = if wav.len() > 44 {
-        match config.asr.engine.as_str() {
-            "local" => {
-                let st = asr::get_status(if config.asr.streaming_enabled {
-                    "streaming"
-                } else {
-                    "classic"
-                });
-                if !st.ready {
-                    return Err(
-                        "请先下载识别模型，或在设置中把识别引擎切换为「MiMo 云端识别」。".into(),
-                    );
-                }
-                // Local ONNX runtime is not linked in this Tauri build yet.
-                return Err(
-                    "本地识别运行时尚未接入，请使用 MiMo 云端识别（设置 → 识别引擎）。".into(),
+        // Stream the response so the HUD can show the transcript as it grows
+        // (perceived latency); any stream failure falls back to one non-stream
+        // retry below.
+        let (api_key, base, model) = mimo_asr_credentials(&config);
+        if api_key.trim().is_empty() {
+            return Err("MiMo API Key 为空，请到「设置 - 云端识别」填写。".into());
+        }
+        let on_partial = {
+            let app = app.clone();
+            move |partial: &str| {
+                let _ = app.emit(
+                    "overlay-update",
+                    serde_json::json!({
+                        "status": "processing",
+                        "processingStage": "transcribing",
+                        "transcript": partial,
+                    }),
                 );
             }
-            _ => {
-                // Default: MiMo cloud ASR. Stream the response so the HUD can
-                // show the transcript as it grows (perceived latency); any
-                // stream failure falls back to one non-stream retry below.
-                let (api_key, base, model) = mimo_asr_credentials(&config);
-                if api_key.trim().is_empty() {
-                    return Err("MiMo API Key 为空，请到「设置 - 云端识别」填写。".into());
-                }
-                let on_partial = {
-                    let app = app.clone();
-                    move |partial: &str| {
-                        let _ = app.emit(
-                            "overlay-update",
-                            serde_json::json!({
-                                "status": "processing",
-                                "processingStage": "transcribing",
-                                "transcript": partial,
-                            }),
-                        );
-                    }
-                };
-                match asr::transcribe_cloud_stream(
-                    &api_key, &base, &model, &wav, "auto", on_partial,
-                )
-                .await
-                {
-                    Ok(text) => text,
-                    Err(e) => {
-                        log::warn!("streaming ASR failed ({e}), retrying non-stream");
-                        asr::transcribe_cloud(&api_key, &base, &model, &wav, "auto").await?
-                    }
-                }
+        };
+        match asr::transcribe_cloud_stream(&api_key, &base, &model, &wav, "auto", on_partial).await
+        {
+            Ok(text) => text,
+            Err(e) => {
+                log::warn!("streaming ASR failed ({e}), retrying non-stream");
+                asr::transcribe_cloud(&api_key, &base, &model, &wav, "auto").await?
             }
         }
     } else {
@@ -1477,52 +1454,6 @@ pub async fn connect_token_dance() -> Result<Value, String> {
     )
 }
 
-#[tauri::command]
-pub fn get_local_asr_status() -> asr::AsrStatus {
-    asr::get_status("classic")
-}
-
-#[tauri::command]
-pub async fn download_local_asr() -> Result<asr::AsrStatus, String> {
-    asr::download("classic").await
-}
-
-#[tauri::command]
-pub fn delete_local_asr(window: WebviewWindow) -> Result<asr::AsrStatus, String> {
-    only_main_window(&window, "Local ASR model deletion")?;
-    asr::delete("classic")
-}
-
-#[tauri::command]
-pub fn get_streaming_asr_status() -> asr::AsrStatus {
-    asr::get_status("streaming")
-}
-
-#[tauri::command]
-pub async fn download_streaming_asr() -> Result<asr::AsrStatus, String> {
-    asr::download("streaming").await
-}
-
-#[tauri::command]
-pub fn delete_streaming_asr(window: WebviewWindow) -> Result<asr::AsrStatus, String> {
-    only_main_window(&window, "Streaming ASR model deletion")?;
-    asr::delete("streaming")
-}
-
-#[tauri::command]
-pub fn open_asr_model_directory(window: WebviewWindow, mode: String) -> Result<(), String> {
-    only_main_window(&window, "ASR model directory access")?;
-    let dir = if mode == "streaming" {
-        asr::streaming_dir()
-    } else if mode == "classic" {
-        asr::classic_dir()
-    } else {
-        return Err("Invalid ASR model directory type".into());
-    };
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    open_path(&dir)
-}
-
 fn open_path(path: &PathBuf) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -1548,16 +1479,6 @@ fn open_path(path: &PathBuf) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
-}
-
-#[tauri::command]
-pub fn get_host_capabilities() -> Value {
-    serde_json::json!({
-        "available": true,
-        "logicalCpuCount": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
-        "memoryBytes": 16u64 * 1024 * 1024 * 1024,
-        "meetsStreamingAsrRecommendation": true,
-    })
 }
 
 #[tauri::command]

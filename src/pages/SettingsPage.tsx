@@ -14,10 +14,6 @@ import {
   Plug,
   RefreshCw,
   Languages,
-  Download,
-  HardDrive,
-  FolderOpen,
-  Trash2,
   Monitor,
   KeyRound,
   MousePointer,
@@ -37,7 +33,6 @@ import {
   TRANSLATION,
   TARGET_LANGUAGES,
 } from '@/shared/constants'
-import { formatHostMemoryGiB } from '@/shared/host-capabilities'
 import { normalizeRefineBaseUrl } from '@/shared/refine-url'
 import {
   defaultLLMRefineConfig,
@@ -48,14 +43,10 @@ import {
 } from '@/shared/llm-config'
 import type {
   AppConfig,
-  ASRMode,
   ConfigSecretRequest,
   FillerCleanupMode,
   LLMRefineConfig,
   LLMProvider,
-  HostCapabilities,
-  LocalASRDownloadProgress,
-  LocalASRStatus,
   LinuxIntegrationStatus,
   TranslationConfig,
   UpdateInfo,
@@ -126,10 +117,8 @@ function isAppPreferencesDirty(current: AppConfig['app'], original: AppConfig['a
 function isAsrConfigDirty(current: AppConfig['asr'], original: AppConfig['asr']): boolean {
   return (
     (current.lowVolumeMode ?? true) !== (original.lowVolumeMode ?? true) ||
-    (current.streamingEnabled ?? false) !== (original.streamingEnabled ?? false) ||
     (current.microphoneDeviceId ?? '') !== (original.microphoneDeviceId ?? '') ||
     (current.microphoneDeviceLabel ?? '') !== (original.microphoneDeviceLabel ?? '') ||
-    (current.engine ?? 'mimo') !== (original.engine ?? 'mimo') ||
     (current.mimoEndpoint ?? '') !== (original.mimoEndpoint ?? '') ||
     (current.mimoModel ?? '') !== (original.mimoModel ?? '') ||
     // A stored key is masked as the placeholder in both snapshots, so equal placeholders mean the
@@ -289,154 +278,6 @@ function ToggleRow({
   )
 }
 
-function ModelCard({
-  icon,
-  title,
-  desc,
-  ready,
-  readyLabel,
-  downloading,
-  progressLabel,
-  progressPercent,
-  deleting,
-  downloadDisabled,
-  downloadLabel,
-  downloadingLabel,
-  onDownload,
-  onDelete,
-  deleteLabel,
-  deletingLabel,
-  supported,
-  unsupportedText,
-  selected,
-  enableLabel,
-  selectedLabel,
-  onSelect,
-  onOpenDirectory,
-  openDirectoryLabel,
-}: {
-  icon: ReactNode
-  title: string
-  desc: string
-  ready: boolean
-  readyLabel: string
-  downloading: boolean
-  progressLabel: string
-  progressPercent?: number | null
-  deleting: boolean
-  downloadDisabled: boolean
-  downloadLabel: string
-  downloadingLabel: string
-  onDownload: () => void
-  onDelete: () => void
-  deleteLabel: string
-  deletingLabel: string
-  supported: boolean
-  unsupportedText: string
-  selected: boolean
-  enableLabel: string
-  selectedLabel: string
-  onSelect: () => void
-  onOpenDirectory: () => void
-  openDirectoryLabel: string
-}) {
-  return (
-    <div className={cn('rounded-lg border bg-secondary/30 p-4', selected && 'border-primary/40')}>
-      <div className="flex flex-wrap items-center gap-3">
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-[10px] bg-card text-primary">
-          {icon}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="text-[13px] font-semibold text-foreground">{title}</span>
-            {ready ? (
-              <span className="inline-flex items-center gap-1 rounded-full border border-green-500/30 bg-green-500/10 px-2 py-0.5 text-[11px] font-medium text-green-600 dark:text-green-500">
-                <CheckCircle2 className="h-3 w-3" />
-                {readyLabel}
-              </span>
-            ) : null}
-          </div>
-          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{desc}</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button
-            variant={selected ? 'default' : 'outline'}
-            size="sm"
-            onClick={onSelect}
-            aria-pressed={selected}
-            disabled={!supported || downloading || deleting}
-            className="no-drag h-8 shrink-0 cursor-pointer text-xs"
-          >
-            {selected ? <CheckCircle2 className="h-3.5 w-3.5" /> : null}
-            {selected ? selectedLabel : enableLabel}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onOpenDirectory}
-            disabled={deleting}
-            className="no-drag h-8 shrink-0 cursor-pointer px-2.5 text-xs text-muted-foreground"
-          >
-            <FolderOpen className="h-3.5 w-3.5" />
-            {openDirectoryLabel}
-          </Button>
-          {ready ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={onDelete}
-              disabled={deleting || downloading}
-              className="no-drag h-8 shrink-0 cursor-pointer px-2.5 text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-            >
-              {deleting ? (
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              ) : (
-                <Trash2 className="h-3.5 w-3.5" />
-              )}
-              {deleting ? deletingLabel : deleteLabel}
-            </Button>
-          ) : (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={onDownload}
-              disabled={downloadDisabled}
-              className="no-drag h-8 shrink-0 cursor-pointer text-xs"
-            >
-              {downloading ? (
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
-              ) : (
-                <Download className="h-3.5 w-3.5" />
-              )}
-              {downloading ? downloadingLabel : downloadLabel}
-            </Button>
-          )}
-        </div>
-      </div>
-      {downloading ? (
-        <div className="mt-3 pl-12">
-          <div className="mb-1 flex items-center justify-between text-[11px] text-muted-foreground">
-            <span>{progressLabel}</span>
-            <span>{progressPercent ?? 0}%</span>
-          </div>
-          <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full rounded-full bg-primary transition-all"
-              style={{ width: `${progressPercent ?? 0}%` }}
-            />
-          </div>
-        </div>
-      ) : null}
-      {!supported ? (
-        <Alert variant="destructive" className="mt-3">
-          <AlertTriangle className="h-4 w-4" />
-          <AlertDescription>{unsupportedText}</AlertDescription>
-        </Alert>
-      ) : null}
-    </div>
-  )
-}
-
 function Segmented({
   value,
   onChange,
@@ -478,7 +319,6 @@ export default function SettingsPage() {
       lowVolumeMode: true,
       microphoneDeviceId: '',
       microphoneDeviceLabel: '',
-      streamingEnabled: false,
     },
     llmRefine: defaultLLMRefineConfig,
     hotkey: {
@@ -503,17 +343,6 @@ export default function SettingsPage() {
   const [connectingTokenDance, setConnectingTokenDance] = useState(false)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
-  const [localAsrStatus, setLocalAsrStatus] = useState<LocalASRStatus | null>(null)
-  const [localAsrProgress, setLocalAsrProgress] = useState<LocalASRDownloadProgress | null>(null)
-  const [downloadingLocalAsr, setDownloadingLocalAsr] = useState(false)
-  const [deletingLocalAsr, setDeletingLocalAsr] = useState(false)
-  const [streamingAsrStatus, setStreamingAsrStatus] = useState<LocalASRStatus | null>(null)
-  const [streamingAsrProgress, setStreamingAsrProgress] = useState<LocalASRDownloadProgress | null>(
-    null,
-  )
-  const [downloadingStreamingAsr, setDownloadingStreamingAsr] = useState(false)
-  const [deletingStreamingAsr, setDeletingStreamingAsr] = useState(false)
-  const [hostCapabilities, setHostCapabilities] = useState<HostCapabilities | null>(null)
   const [microphoneDevices, setMicrophoneDevices] = useState<AudioInputDevice[]>([])
   const [loadingMicrophones, setLoadingMicrophones] = useState(false)
   const [microphoneError, setMicrophoneError] = useState<string | null>(null)
@@ -599,96 +428,6 @@ export default function SettingsPage() {
     isConfigLoading,
     refreshLinuxIntegrationStatus,
   ])
-
-  useEffect(() => {
-    const loadLocalAsrStatus = async () => {
-      try {
-        const status = await window.electronAPI.getLocalASRStatus()
-        setLocalAsrStatus(status)
-        setDownloadingLocalAsr(status.downloading)
-        setLocalAsrProgress(status.progress ?? null)
-      } catch (error) {
-        console.error('Failed to load local ASR status:', error)
-      }
-    }
-
-    void loadLocalAsrStatus()
-
-    return window.electronAPI.onLocalASRDownloadProgress((progress) => {
-      setLocalAsrProgress(progress)
-      setDownloadingLocalAsr(true)
-      setLocalAsrStatus((prev) => (prev ? { ...prev, downloading: true, progress } : prev))
-    })
-  }, [])
-
-  // While a download is in flight, poll the real status so the UI recovers
-  // when progress hits 100% or the download finished outside this page
-  // (progress events alone never report completion).
-  useEffect(() => {
-    if (!downloadingLocalAsr) return
-
-    const timer = setInterval(() => {
-      void window.electronAPI
-        .getLocalASRStatus()
-        .then((status) => {
-          if (status.downloading) return
-          setLocalAsrStatus(status)
-          setLocalAsrProgress(status.progress ?? null)
-          setDownloadingLocalAsr(false)
-        })
-        .catch((error) => {
-          console.error('Failed to refresh local ASR status:', error)
-        })
-    }, 2000)
-
-    return () => clearInterval(timer)
-  }, [downloadingLocalAsr])
-
-  useEffect(() => {
-    const loadStreamingAsrStatus = async () => {
-      try {
-        const status = await window.electronAPI.getStreamingASRStatus()
-        setStreamingAsrStatus(status)
-        setDownloadingStreamingAsr(status.downloading)
-        setStreamingAsrProgress(status.progress ?? null)
-      } catch (error) {
-        console.error('Failed to load streaming ASR status:', error)
-      }
-    }
-
-    void loadStreamingAsrStatus()
-    void window.electronAPI
-      .getHostCapabilities()
-      .then(setHostCapabilities)
-      .catch((error) => {
-        console.error('Failed to load host capabilities:', error)
-      })
-    return window.electronAPI.onStreamingASRDownloadProgress((progress) => {
-      setStreamingAsrProgress(progress)
-      setDownloadingStreamingAsr(true)
-      setStreamingAsrStatus((prev) => (prev ? { ...prev, downloading: true, progress } : prev))
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!downloadingStreamingAsr) return
-
-    const timer = setInterval(() => {
-      void window.electronAPI
-        .getStreamingASRStatus()
-        .then((status) => {
-          if (status.downloading) return
-          setStreamingAsrStatus(status)
-          setStreamingAsrProgress(status.progress ?? null)
-          setDownloadingStreamingAsr(false)
-        })
-        .catch((error) => {
-          console.error('Failed to refresh streaming ASR status:', error)
-        })
-    }, 2000)
-
-    return () => clearInterval(timer)
-  }, [downloadingStreamingAsr])
 
   const loadMicrophoneDevices = useCallback(async () => {
     const requestId = ++microphoneLoadRequestIdRef.current
@@ -1059,151 +798,6 @@ export default function SettingsPage() {
       clearAutoSaveTimer()
     }
   }, [config, originalConfig, isConfigLoading])
-
-  const handleDownloadLocalASR = async () => {
-    setDownloadingLocalAsr(true)
-    setAsrTestStatus(null)
-    try {
-      const status = await window.electronAPI.downloadLocalASR()
-      setLocalAsrStatus(status)
-      setLocalAsrProgress(status.progress ?? null)
-      if (status.ready) {
-        setAsrTestStatus({ type: 'success', message: t('settings.localAsr.downloadComplete') })
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : t('common.unknownError')
-      setAsrTestStatus({
-        type: 'error',
-        message: t('settings.localAsr.downloadFailed', { message: errorMessage }),
-      })
-    } finally {
-      setDownloadingLocalAsr(false)
-    }
-  }
-
-  const handleDownloadStreamingASR = async () => {
-    if (hostCapabilities?.available && !hostCapabilities.meetsStreamingAsrRecommendation) {
-      const confirmed = window.confirm(
-        t('settings.streamingAsr.downloadConfirmWeak', {
-          cpu: hostCapabilities.logicalCpuCount,
-          memory: formatHostMemoryGiB(hostCapabilities.memoryBytes),
-        }),
-      )
-      if (!confirmed) return
-    }
-
-    setDownloadingStreamingAsr(true)
-    setAsrTestStatus(null)
-    try {
-      const status = await window.electronAPI.downloadStreamingASR()
-      setStreamingAsrStatus(status)
-      setStreamingAsrProgress(status.progress ?? null)
-      if (status.ready) {
-        setAsrTestStatus({
-          type: 'success',
-          message: t('settings.streamingAsr.downloadComplete'),
-        })
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : t('common.unknownError')
-      setAsrTestStatus({
-        type: 'error',
-        message: t('settings.streamingAsr.downloadFailed', { message: errorMessage }),
-      })
-    } finally {
-      setDownloadingStreamingAsr(false)
-    }
-  }
-
-  const handleOpenASRModelDirectory = async (mode: ASRMode) => {
-    setAsrTestStatus(null)
-    try {
-      await window.electronAPI.openASRModelDirectory(mode)
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : t('common.unknownError')
-      setAsrTestStatus({
-        type: 'error',
-        message: t('settings.modelStorage.openFailed', { message: errorMessage }),
-      })
-    }
-  }
-
-  const handleDeleteLocalASR = async () => {
-    if (!window.confirm(t('settings.localAsr.deleteConfirm'))) return
-
-    setDeletingLocalAsr(true)
-    setAsrTestStatus(null)
-    try {
-      const status = await window.electronAPI.deleteLocalASR()
-      setLocalAsrStatus(status)
-      setLocalAsrProgress(null)
-      setAsrTestStatus({ type: 'success', message: t('settings.localAsr.deleteComplete') })
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : t('common.unknownError')
-      setAsrTestStatus({
-        type: 'error',
-        message: t('settings.localAsr.deleteFailed', { message: errorMessage }),
-      })
-    } finally {
-      setDeletingLocalAsr(false)
-    }
-  }
-
-  const handleDeleteStreamingASR = async () => {
-    if (!window.confirm(t('settings.streamingAsr.deleteConfirm'))) return
-
-    setDeletingStreamingAsr(true)
-    setAsrTestStatus(null)
-    try {
-      const status = await window.electronAPI.deleteStreamingASR()
-      setStreamingAsrStatus(status)
-      setStreamingAsrProgress(null)
-      setConfig((prev) => ({
-        ...prev,
-        asr: { ...prev.asr, streamingEnabled: false },
-      }))
-      setOriginalConfig((prev) =>
-        prev
-          ? {
-              ...prev,
-              asr: { ...prev.asr, streamingEnabled: false },
-            }
-          : prev,
-      )
-      setAsrTestStatus({ type: 'success', message: t('settings.streamingAsr.deleteComplete') })
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : t('common.unknownError')
-      setAsrTestStatus({
-        type: 'error',
-        message: t('settings.streamingAsr.deleteFailed', { message: errorMessage }),
-      })
-    } finally {
-      setDeletingStreamingAsr(false)
-    }
-  }
-
-  const handleSelectASRMode = (mode: ASRMode) => {
-    const streamingEnabled = mode === 'streaming'
-    if ((config.asr.streamingEnabled ?? false) === streamingEnabled) return
-
-    if (!(streamingEnabled ? streamingAsrStatus : localAsrStatus)?.ready) {
-      setAsrTestStatus({
-        type: 'error',
-        message: t(
-          streamingEnabled
-            ? 'settings.streamingAsr.downloadBeforeEnable'
-            : 'settings.localAsr.downloadBeforeEnable',
-        ),
-      })
-      return
-    }
-
-    setAsrTestStatus(null)
-    setConfig((prev) => ({
-      ...prev,
-      asr: { ...prev.asr, streamingEnabled },
-    }))
-  }
 
   const disableRefineDependentFeatures = () => {
     setConfig((prev) => {
@@ -1841,10 +1435,6 @@ export default function SettingsPage() {
   const selectedMicrophoneUnavailable = Boolean(selectedMicrophoneDeviceId && !selectedMicrophone)
   const selectedMicrophoneLabel =
     config.asr.microphoneDeviceLabel?.trim() || t('settings.microphone.unknownDevice')
-  const localAsrReady = Boolean(localAsrStatus?.ready)
-  const localAsrSupported = localAsrStatus?.supported ?? true
-  const streamingAsrReady = Boolean(streamingAsrStatus?.ready)
-  const streamingAsrSupported = streamingAsrStatus?.supported ?? true
   const normalizedLLMRefineConfig = normalizeLLMRefineConfig(config.llmRefine)
   const activeLLMConnection = resolveLLMConnection(normalizedLLMRefineConfig)
   const currentLLMProvider = normalizedLLMRefineConfig.provider
@@ -1978,27 +1568,16 @@ export default function SettingsPage() {
     }
   }
 
-  const localAsrProgressPercent = localAsrProgress?.percent ?? localAsrStatus?.progress?.percent
-  const localAsrProgressPhase = localAsrProgress?.phase ?? localAsrStatus?.progress?.phase
-  const localAsrProgressLabel = localAsrProgressPhase
-    ? t(`settings.localAsr.phase.${localAsrProgressPhase}`)
-    : t('settings.localAsr.downloading')
-  const streamingAsrProgressPercent =
-    streamingAsrProgress?.percent ?? streamingAsrStatus?.progress?.percent
-  const streamingAsrProgressPhase =
-    streamingAsrProgress?.phase ?? streamingAsrStatus?.progress?.phase
-  const streamingAsrProgressLabel = streamingAsrProgressPhase
-    ? t(`settings.streamingAsr.phase.${streamingAsrProgressPhase}`)
-    : t('settings.streamingAsr.downloading')
-  const streamingEnabled = config.asr.streamingEnabled ?? false
-  const asrHealthReady = streamingEnabled ? streamingAsrReady : localAsrReady
+  // MiMo cloud ASR is the only engine: readiness mirrors the credential
+  // fallback chain the Rust side uses (`mimo_asr_credentials`).
+  const asrHealthReady = Boolean(
+    (config.asr.mimoApiKey ?? '').trim() ||
+    config.llmRefine.mimo.apiKey.trim() ||
+    config.llmRefine.apiKey.trim(),
+  )
   const asrHealthStatus = asrHealthReady
-    ? streamingEnabled
-      ? t('settings.health.asrStreamingReady')
-      : t('settings.health.asrLocalReady')
-    : streamingEnabled
-      ? t('settings.health.asrStreamingMissing')
-      : t('settings.health.asrLocalMissing')
+    ? t('settings.health.asrCloudReady')
+    : t('settings.health.asrCloudMissing')
 
   const translationActive = config.translation.enabled || translateOutput
   const activeTargetLanguage = TARGET_LANGUAGES.find(
@@ -2182,178 +1761,97 @@ export default function SettingsPage() {
             </div>
 
             <div className="mt-4 space-y-3">
-              <div className="space-y-2">
-                <Label>{t('settings.asrEngine')}</Label>
-                <Segmented
-                  value={(config.asr.engine ?? 'mimo') === 'local' ? 'local' : 'mimo'}
-                  onChange={(value) => {
-                    const engine = value === 'local' ? 'local' : 'mimo'
-                    setConfig((prev) => ({
-                      ...prev,
-                      asr: { ...prev.asr, engine },
-                    }))
-                  }}
-                  options={[
-                    { value: 'mimo', label: t('settings.asrEngineMimo') },
-                    { value: 'local', label: t('settings.asrEngineLocal') },
-                  ]}
-                />
-                <p className="text-xs text-muted-foreground">{t('settings.asrEngineHelp')}</p>
-              </div>
-
-              {(config.asr.engine ?? 'mimo') === 'mimo' && (
-                <div className="space-y-4 rounded-lg border border-border/60 p-3">
-                  <div className="space-y-2">
-                    <Label htmlFor="asrMimoEndpoint">
-                      {t('settings.refineEndpoint')} <span className="text-primary">*</span>
-                    </Label>
-                    <Input
-                      id="asrMimoEndpoint"
-                      type="text"
-                      value={config.asr.mimoEndpoint ?? ''}
-                      onChange={(e) =>
-                        setConfig((prev) => ({
-                          ...prev,
-                          asr: { ...prev.asr, mimoEndpoint: e.target.value },
-                        }))
-                      }
-                      placeholder="https://api.xiaomimimo.com/v1"
-                      className="no-drag font-mono"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {t('settings.asrMimoEndpointHelp')}
-                    </p>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="asrMimoModel">{t('settings.refineModel')}</Label>
-                    <Input
-                      id="asrMimoModel"
-                      type="text"
-                      value={config.asr.mimoModel ?? 'mimo-v2.5-asr'}
-                      onChange={(e) =>
-                        setConfig((prev) => ({
-                          ...prev,
-                          asr: { ...prev.asr, mimoModel: e.target.value },
-                        }))
-                      }
-                      placeholder="mimo-v2.5-asr"
-                      className="no-drag font-mono"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="asrMimoApiKey">
-                      {t('settings.refineApiKey')} <span className="text-primary">*</span>
-                    </Label>
-                    <div className="relative">
-                      <Input
-                        id="asrMimoApiKey"
-                        type={visibleSecret?.id === 'asr:mimo' ? 'text' : 'password'}
-                        value={
-                          visibleSecret?.id === 'asr:mimo'
-                            ? (visibleSecret.value ?? config.asr.mimoApiKey ?? '')
-                            : (config.asr.mimoApiKey ?? '')
-                        }
-                        onChange={(e) => {
-                          const nextValue = stripStoredSecretPlaceholder(
-                            e.target.value,
-                            config.asr.mimoApiKey ?? '',
-                          )
-                          setVisibleSecret((current) =>
-                            current?.id === 'asr:mimo' ? { id: current.id } : current,
-                          )
-                          setConfig((prev) => ({
-                            ...prev,
-                            asr: { ...prev.asr, mimoApiKey: nextValue },
-                          }))
-                        }}
-                        placeholder={t('settings.asrMimoApiKeyPlaceholder')}
-                        className="no-drag pr-10 font-mono"
-                      />
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void handleSecretVisibilityToggle(
-                            { scope: 'asr', provider: 'mimo' },
-                            'asr:mimo',
-                            config.asr.mimoApiKey ?? '',
-                          )
-                        }
-                        disabled={revealingSecretId === 'asr:mimo'}
-                        aria-label={t('settings.showRefineKey')}
-                        className="no-drag absolute inset-y-0 right-0 flex items-center pr-3 text-muted-foreground hover:text-foreground"
-                      >
-                        {visibleSecret?.id === 'asr:mimo' ? (
-                          <EyeOff className="h-4 w-4" />
-                        ) : (
-                          <Eye className="h-4 w-4" />
-                        )}
-                      </button>
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {t('settings.asrMimoApiKeyHelp')}
-                    </p>
-                  </div>
+              <div className="space-y-4 rounded-lg border border-border/60 p-3">
+                <div className="space-y-2">
+                  <Label htmlFor="asrMimoEndpoint">
+                    {t('settings.refineEndpoint')} <span className="text-primary">*</span>
+                  </Label>
+                  <Input
+                    id="asrMimoEndpoint"
+                    type="text"
+                    value={config.asr.mimoEndpoint ?? ''}
+                    onChange={(e) =>
+                      setConfig((prev) => ({
+                        ...prev,
+                        asr: { ...prev.asr, mimoEndpoint: e.target.value },
+                      }))
+                    }
+                    placeholder="https://api.xiaomimimo.com/v1"
+                    className="no-drag font-mono"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.asrMimoEndpointHelp')}
+                  </p>
                 </div>
-              )}
-            </div>
-
-            {(config.asr.engine ?? 'mimo') === 'local' && (
-              <div className="mt-4 space-y-3">
-                <ModelCard
-                  icon={<HardDrive className="h-4 w-4" />}
-                  title={t('settings.localAsr.title')}
-                  desc={t('settings.localAsr.help')}
-                  ready={localAsrReady}
-                  readyLabel={t('settings.localAsr.ready')}
-                  downloading={downloadingLocalAsr}
-                  progressLabel={localAsrProgressLabel}
-                  progressPercent={localAsrProgressPercent}
-                  deleting={deletingLocalAsr}
-                  downloadDisabled={!localAsrSupported || downloadingLocalAsr}
-                  downloadLabel={t('settings.localAsr.download')}
-                  downloadingLabel={t('settings.localAsr.downloading')}
-                  onDownload={handleDownloadLocalASR}
-                  onDelete={handleDeleteLocalASR}
-                  deleteLabel={t('settings.modelStorage.delete')}
-                  deletingLabel={t('settings.modelStorage.deleting')}
-                  supported={localAsrSupported}
-                  unsupportedText={t('settings.localAsr.unsupported')}
-                  selected={!streamingEnabled}
-                  enableLabel={t('settings.modelStorage.enable')}
-                  selectedLabel={t('settings.modelStorage.selected')}
-                  onSelect={() => handleSelectASRMode('classic')}
-                  onOpenDirectory={() => void handleOpenASRModelDirectory('classic')}
-                  openDirectoryLabel={t('settings.modelStorage.open')}
-                />
-
-                <ModelCard
-                  icon={<Activity className="h-4 w-4" />}
-                  title={t('settings.streamingAsr.title')}
-                  desc={t('settings.streamingAsr.help')}
-                  ready={streamingAsrReady}
-                  readyLabel={t('settings.streamingAsr.ready')}
-                  downloading={downloadingStreamingAsr}
-                  progressLabel={streamingAsrProgressLabel}
-                  progressPercent={streamingAsrProgressPercent}
-                  deleting={deletingStreamingAsr}
-                  downloadDisabled={!streamingAsrSupported || downloadingStreamingAsr}
-                  downloadLabel={t('settings.streamingAsr.download')}
-                  downloadingLabel={t('settings.streamingAsr.downloading')}
-                  onDownload={handleDownloadStreamingASR}
-                  onDelete={handleDeleteStreamingASR}
-                  deleteLabel={t('settings.modelStorage.delete')}
-                  deletingLabel={t('settings.modelStorage.deleting')}
-                  supported={streamingAsrSupported}
-                  unsupportedText={t('settings.streamingAsr.unsupported')}
-                  selected={streamingEnabled}
-                  enableLabel={t('settings.modelStorage.enable')}
-                  selectedLabel={t('settings.modelStorage.selected')}
-                  onSelect={() => handleSelectASRMode('streaming')}
-                  onOpenDirectory={() => void handleOpenASRModelDirectory('streaming')}
-                  openDirectoryLabel={t('settings.modelStorage.open')}
-                />
+                <div className="space-y-2">
+                  <Label htmlFor="asrMimoModel">{t('settings.refineModel')}</Label>
+                  <Input
+                    id="asrMimoModel"
+                    type="text"
+                    value={config.asr.mimoModel ?? 'mimo-v2.5-asr'}
+                    onChange={(e) =>
+                      setConfig((prev) => ({
+                        ...prev,
+                        asr: { ...prev.asr, mimoModel: e.target.value },
+                      }))
+                    }
+                    placeholder="mimo-v2.5-asr"
+                    className="no-drag font-mono"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="asrMimoApiKey">
+                    {t('settings.refineApiKey')} <span className="text-primary">*</span>
+                  </Label>
+                  <div className="relative">
+                    <Input
+                      id="asrMimoApiKey"
+                      type={visibleSecret?.id === 'asr:mimo' ? 'text' : 'password'}
+                      value={
+                        visibleSecret?.id === 'asr:mimo'
+                          ? (visibleSecret.value ?? config.asr.mimoApiKey ?? '')
+                          : (config.asr.mimoApiKey ?? '')
+                      }
+                      onChange={(e) => {
+                        const nextValue = stripStoredSecretPlaceholder(
+                          e.target.value,
+                          config.asr.mimoApiKey ?? '',
+                        )
+                        setVisibleSecret((current) =>
+                          current?.id === 'asr:mimo' ? { id: current.id } : current,
+                        )
+                        setConfig((prev) => ({
+                          ...prev,
+                          asr: { ...prev.asr, mimoApiKey: nextValue },
+                        }))
+                      }}
+                      placeholder={t('settings.asrMimoApiKeyPlaceholder')}
+                      className="no-drag pr-10 font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void handleSecretVisibilityToggle(
+                          { scope: 'asr', provider: 'mimo' },
+                          'asr:mimo',
+                          config.asr.mimoApiKey ?? '',
+                        )
+                      }
+                      disabled={revealingSecretId === 'asr:mimo'}
+                      aria-label={t('settings.showRefineKey')}
+                      className="no-drag absolute inset-y-0 right-0 flex items-center pr-3 text-muted-foreground hover:text-foreground"
+                    >
+                      {visibleSecret?.id === 'asr:mimo' ? (
+                        <EyeOff className="h-4 w-4" />
+                      ) : (
+                        <Eye className="h-4 w-4" />
+                      )}
+                    </button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t('settings.asrMimoApiKeyHelp')}</p>
+                </div>
               </div>
-            )}
+            </div>
 
             <InlineFeedback status={asrTestStatus} testId="asr-test-status" />
 

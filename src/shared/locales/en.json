@@ -116,10 +116,8 @@
     "aboutHint": "Stay up to date for the best experience",
     "health": {
       "asr": "Speech recognition",
-      "asrLocalReady": "Standard recognition ready",
-      "asrLocalMissing": "Standard recognition not downloaded",
-      "asrStreamingReady": "Realtime recognition ready",
-      "asrStreamingMissing": "Realtime recognition not downloaded",
+      "asrCloudReady": "MiMo cloud ready",
+      "asrCloudMissing": "MiMo cloud not configured",
       "refine": "Text model",
       "refineOn": "Ready",
       "refineOff": "Incomplete",
@@ -176,10 +174,6 @@
     "llmProvider": "Model Provider",
     "llmProviderHelp": "Current request endpoint: {{endpoint}}",
     "mimoModelHelp": "Chat model id, e.g. mimo-v2.5. See {{url}}.",
-    "asrEngine": "ASR engine",
-    "asrEngineMimo": "MiMo cloud",
-    "asrEngineLocal": "Local model",
-    "asrEngineHelp": "Cloud ASR works out of the box (mimo-v2.5-asr). Local models need a one-time download and work offline.",
     "asrMimoEndpointHelp": "Default https://api.xiaomimimo.com/v1. Leave empty to use the default.",
     "asrMimoApiKeyPlaceholder": "Enter MiMo ASR API Key",
     "asrMimoApiKeyHelp": "Can be the same key as MiMo refine. If empty, the refine MiMo key is used.",
@@ -245,49 +239,6 @@
       "permissionHelp": "Microphone permission is needed to show device names.",
       "unsupported": "This environment cannot detect microphone devices.",
       "detectFailed": "Couldn't detect microphones."
-    },
-    "modelStorage": {
-      "open": "Open folder",
-      "openFailed": "Couldn't open the model folder: {{message}}",
-      "enable": "Enable",
-      "selected": "Selected",
-      "delete": "Delete model",
-      "deleting": "Deleting..."
-    },
-    "localAsr": {
-      "title": "Standard recognition",
-      "help": "Recognizes after recording ends. A little slower, but more accurate.",
-      "ready": "Ready",
-      "download": "Download model",
-      "downloading": "Downloading...",
-      "downloadComplete": "Standard recognition is ready",
-      "downloadFailed": "Couldn't download the model: {{message}}",
-      "downloadBeforeEnable": "Download the standard recognition model first, or switch to MiMo cloud ASR (no local download).",
-      "deleteConfirm": "Delete the standard recognition model? You'll need to download it again to use standard recognition.",
-      "deleteComplete": "The standard recognition model was deleted.",
-      "deleteFailed": "Couldn't delete the model: {{message}}",
-      "unsupported": "Standard recognition is not available on this platform.",
-      "phase": {
-        "model": "Downloading model"
-      }
-    },
-    "streamingAsr": {
-      "title": "Realtime recognition",
-      "help": "Streaming output recognizes speech as you speak, with slightly lower accuracy.",
-      "downloadConfirmWeak": "This computer has about {{cpu}} cores and {{memory}} GB of memory, below the recommended 6 cores and 16 GB. Realtime recognition may stutter. Download anyway?",
-      "ready": "Ready",
-      "download": "Download model",
-      "downloading": "Downloading...",
-      "downloadComplete": "Realtime recognition is ready",
-      "downloadFailed": "Couldn't download the model: {{message}}",
-      "downloadBeforeEnable": "Download the realtime recognition model from the Settings card (Hugging Face / ModelScope), or switch to MiMo cloud ASR.",
-      "deleteConfirm": "Delete the realtime recognition model? Realtime recognition will be turned off, and you'll need to download it again to use it.",
-      "deleteComplete": "The realtime recognition model was deleted.",
-      "deleteFailed": "Couldn't delete the model: {{message}}",
-      "unsupported": "Realtime recognition is not available on this platform.",
-      "phase": {
-        "model": "Downloading model"
-      }
     },
     "languagePlaceholder": "Select language",
     "languageChinese": "Chinese (中文)",

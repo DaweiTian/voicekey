@@ -6,15 +6,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import type {
   AppConfig,
-  ASRMode,
   ConfigSecretRequest,
   HistoryItem,
-  HostCapabilities,
   LanguageSnapshot,
   LinuxIntegrationStatus,
   LLMRefineConfig,
-  LocalASRDownloadProgress,
-  LocalASRStatus,
   LogEntryPayload,
   LogTailOptions,
   OverlayEdge,
@@ -95,18 +91,6 @@ export const tauriApi = {
   testRefineConnection: (config: LLMRefineConfig) =>
     invoke<RefineConnectionResult>('test_refine_connection', { config }),
   connectTokenDance: () => invoke<{ ok: boolean; message?: string }>('connect_token_dance'),
-  getLocalASRStatus: () => invoke<LocalASRStatus>('get_local_asr_status'),
-  downloadLocalASR: () => invoke<LocalASRStatus>('download_local_asr'),
-  deleteLocalASR: () => invoke<LocalASRStatus>('delete_local_asr'),
-  onLocalASRDownloadProgress: (cb: (progress: LocalASRDownloadProgress) => void): Unsub =>
-    listenAsync('local-asr-download-progress', cb),
-  getStreamingASRStatus: () => invoke<LocalASRStatus>('get_streaming_asr_status'),
-  downloadStreamingASR: () => invoke<LocalASRStatus>('download_streaming_asr'),
-  deleteStreamingASR: () => invoke<LocalASRStatus>('delete_streaming_asr'),
-  onStreamingASRDownloadProgress: (cb: (progress: LocalASRDownloadProgress) => void): Unsub =>
-    listenAsync('streaming-asr-download-progress', cb),
-  openASRModelDirectory: (mode: ASRMode) => invoke('open_asr_model_directory', { mode }),
-  getHostCapabilities: () => invoke<HostCapabilities>('get_host_capabilities'),
   getAppLanguage: () => invoke<LanguageSnapshot>('get_app_language'),
   onAppLanguageChanged: (cb: (snapshot: LanguageSnapshot) => void): Unsub =>
     listenAsync('app-language-changed', cb),
