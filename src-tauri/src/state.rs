@@ -28,13 +28,21 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(_app: &tauri::AppHandle) -> Result<Self, String> {
-        Ok(Self {
+    /// Construct the shared state. Deliberately takes **no** `AppHandle`, so it
+    /// can be registered with `tauri::Builder::manage` (see `lib.rs`) — i.e.
+    /// before the config-created windows (main / overlay / session / background)
+    /// load their webviews. Those webviews invoke `get_config` /
+    /// `get_app_language` the moment they run, which is *before* `setup()`
+    /// executes; managing the state in `setup()` lost that first call ("state
+    /// not managed") and the overlay HUD silently fell back to its expanded
+    /// capsule while its window sat at a persisted half-hidden dock.
+    pub fn new() -> Self {
+        Self {
             config: ConfigStore::new(),
             session: Mutex::new(AudioSession::default()),
             language: Mutex::new("system".into()),
             hotkey_capture_active: AtomicBool::new(false),
-        })
+        }
     }
 
     /// Whether the settings hotkey recorder currently owns the keyboard.
@@ -44,5 +52,22 @@ impl AppState {
 
     pub fn set_hotkey_capture_active(&self, active: bool) {
         self.hotkey_capture_active.store(active, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `AppState` must stay constructible **without** an `AppHandle` so `lib.rs`
+    /// can register it on the builder chain, before the config-created windows
+    /// load their webviews. If this ever needs a handle again, the state has to
+    /// move back into `setup()` and the startup `get_config` race (which left the
+    /// HUD capsule expanded at a half-hidden dock) returns.
+    #[test]
+    fn state_is_constructible_without_an_app_handle() {
+        let state = AppState::new();
+        assert_eq!(*state.language.lock().unwrap(), "system");
+        assert!(!state.hotkey_capture_active());
     }
 }

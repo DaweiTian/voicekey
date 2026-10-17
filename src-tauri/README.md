@@ -9,7 +9,10 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
 - `src/lib.rs` - Builder 装配：插件注册（**`tauri-plugin-single-instance` 必须注册在
   链首**：二次启动把 argv 交给首个实例后立即退出，回调里 `windowing::open_main_window`
   聚焦/重建已有实例主窗口，不会重复建托盘/overlay/热键、也不会竞态统计数据文件；
-  其余含 `tauri-plugin-autostart`）、主窗口 CloseRequested → 隐藏到托盘并启动 5 分钟
+  其余含 `tauri-plugin-autostart`；**`AppState` 在 builder 链上 `manage`（早于任何窗口 /
+  WebView 加载——配置窗口的 WebView 在 `setup()` 之前就会调用 `get_config`，一旦挪回
+  `setup()` 即 `state not managed`，overlay HUD 会丢失持久化贴边形态、首启胶囊半出屏）**）、
+  主窗口 CloseRequested → 隐藏到托盘并启动 5 分钟
   延迟销毁（`windowing`）（唯一真正退出路径是托盘 Quit）、overlay CloseRequested →
   `prevent_close` + `commands::hide_overlay`（悬浮胶囊绝不销毁，渲染层持有
   `core:window:allow-close`）、session CloseRequested → `prevent_close` +

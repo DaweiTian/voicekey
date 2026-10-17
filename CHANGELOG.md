@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.13](https://github.com/BuildWithAIs/voicekey/compare/v0.5.12...v0.5.13) (2026-10-17)
+
+### Bug Fixes
+
+- **overlay:** 修复**新装/升级首启待机胶囊半出屏**（「一半在屏幕外面」、只有拖一下才回正）。根因是**启动竞态**：`AppState` 原本在 `tauri::Builder::setup()` 里 `manage`，而配置窗口（main / overlay / …）的 WebView 在 `setup()` **之前**就已加载并调用 `get_config` / `get_app_language`，首个调用必然失败（`state not managed`，本机 `voice-key.log` 每次启动都有该错误）。overlay HUD 挂载时靠 `get_config` 读回 `app.overlayDocked` 决定首帧形态，该读取失败后**静默回落全形**；而 Rust 启动时已把窗口按持久化坐标摆到**半隐贴边位**（窗口中线压屏幕边、一半在屏外），于是用户看到「半只胶囊在屏外」，拖一下（`setOverlayPosition` 返回值）才纠正。修法：`AppState::new()` 去掉未使用的 `AppHandle` 参数，状态改为在 **builder 链**上 `manage`（早于任何窗口 / WebView 加载），从根上消除竞态，同时消除首启 `get_app_language` 的 i18n 警告
+- **overlay:** HUD 首帧形态同步——胶囊入场（`isVisible`）推迟到 `overlayDocked` 读回之后（300ms 超时兜底），首帧即已是正确形态（贴边 → 紧凑 + 贴齐；否则全形），消除「先全形半出屏、再收缩」的闪烁；新增纯函数 `resolveInitialDockEdge` 与单测锁定启动恢复契约
+
 ## [0.5.12](https://github.com/BuildWithAIs/voicekey/compare/v0.5.11...v0.5.12) (2026-10-17)
 
 ### Features

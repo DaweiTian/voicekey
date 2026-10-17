@@ -34,6 +34,15 @@ pub fn run() {
     windowing::enable_transparent_webview_background();
 
     tauri::Builder::default()
+        // Shared state is registered here, on the builder chain, so it exists
+        // *before* the config-created windows (main / overlay / session /
+        // background) load their webviews. Those webviews call `get_config` /
+        // `get_app_language` as soon as they run, which happens before `setup()`
+        // executes — managing in `setup()` lost that first call ("state not
+        // managed"), and the overlay HUD then silently fell back to its expanded
+        // capsule while its window sat at a persisted half-hidden dock (the
+        // "new-install capsule half off-screen until you drag it" bug).
+        .manage(AppState::new())
         // Single-instance guard, registered FIRST: a second launch hands its
         // argv to the running instance and exits before any other plugin or
         // `setup` work can double-run (no second tray icon / overlay / hotkey
@@ -129,9 +138,6 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            let state = AppState::new(app.handle())?;
-            app.manage(state);
-
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.set_title("芷若");
             }

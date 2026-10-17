@@ -19,6 +19,7 @@ import {
   onPointerUp,
   onWatchdog,
   onWindowBlur,
+  resolveInitialDockEdge,
   setWinStart,
   type DragCommand,
   type OverlayDragState,
@@ -537,6 +538,33 @@ describe('isOverlayEdge (docked compact capsule gate)', () => {
     expect(isOverlayEdge('center')).toBe(false)
     expect(isOverlayEdge(0)).toBe(false)
     expect(isOverlayEdge({ edge: 'left' })).toBe(false)
+  })
+})
+
+// 首启形态恢复（0.5.13 修复点）：HUD 挂载时用持久化的 `app.overlayDocked` 决定首帧
+// 形态。Rust 启动即把窗口摆回持久化坐标（贴边 → 窗口中线压屏幕边、**一半在屏外**），
+// 因此渲染层必须首帧就画紧凑胶囊，否则用户看到「半只胶囊在屏外」、只有拖一下才纠正。
+describe('resolveInitialDockEdge (startup shape restore)', () => {
+  it('restores each persisted docked edge so the capsule starts compact', () => {
+    for (const edge of ['left', 'right', 'top', 'bottom'] as const) {
+      expect(resolveInitialDockEdge(edge)).toBe(edge)
+    }
+  })
+
+  it('falls back to the expanded capsule for a fresh install / malformed value', () => {
+    expect(resolveInitialDockEdge(null)).toBeNull()
+    expect(resolveInitialDockEdge(undefined)).toBeNull()
+    expect(resolveInitialDockEdge('')).toBeNull()
+    expect(resolveInitialDockEdge('nonsense')).toBeNull()
+    expect(resolveInitialDockEdge(42)).toBeNull()
+  })
+
+  it('a persisted docked edge pairs with the in-screen flush translate', () => {
+    const edge = resolveInitialDockEdge('right')
+    if (edge === null) throw new Error('expected a docked edge')
+    // Expanded at the half-hidden dock would be half off-screen; the compact
+    // shape's flush translate is what keeps it fully visible.
+    expect(DOCK_TRANSLATE[edge]).toBe('-translate-x-4')
   })
 })
 

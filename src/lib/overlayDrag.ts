@@ -438,6 +438,16 @@ export function isOverlayEdge(value: unknown): value is OverlayEdge {
 }
 
 /**
+ * 启动时从持久化配置 `app.overlayDocked` 解析初始贴边态。HUD 挂载时读取一次，
+ * 决定首帧胶囊形态（贴边 → 紧凑 + 贴齐；否则全形）——这是「首启默认态自带一次
+ * 形态同步、不依赖用户拖一下才纠正」的实现点。脏值（`null` / 未知字符串 / 数字 /
+ * 对象）一律按未贴边处理，复用 `isOverlayEdge` 的 invoke 边界不可信原则。
+ */
+export function resolveInitialDockEdge(stored: unknown): OverlayEdge | null {
+  return isOverlayEdge(stored) ? stored : null
+}
+
+/**
  * 贴边紧凑胶囊的边长（**逻辑 px** = Tailwind `h-8`）。
  *
  * 为什么是 32 而不是全形的 36：0.5.4 的中线落点让吸附后的**窗口中心线**恰在工作区

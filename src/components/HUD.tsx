@@ -24,6 +24,7 @@ import {
   onPointerUp,
   onWatchdog,
   onWindowBlur,
+  resolveInitialDockEdge,
   setWinStart,
   SILENCE_LEVEL_THRESHOLD,
   type DragCommand,
@@ -135,10 +136,40 @@ export function HUD() {
     return windowRef.current
   }, [])
 
+  /**
+   * 启动：恢复持久化的贴边形态，**读回之后**才让胶囊入场。
+   *
+   * 顺序是刻意的：Rust 启动时把窗口摆回持久化坐标（贴边 → 窗口中线压屏幕边、
+   * 一半在屏外）；若渲染层此时仍按全形绘制，用户看到的就是「半只胶囊在屏外」，
+   * 只有拖一下（`setOverlayPosition` 返回值）才纠正——这正是「新装首启胶囊半出屏」
+   * 缺陷。把入场（`isVisible`）推迟到 `overlayDocked` 读回之后，首帧即已是正确形态；
+   * 读取失败或超时（300ms 兜底）也照常入场，绝不把胶囊永久藏起来。
+   */
   useEffect(() => {
     document.documentElement.classList.add('overlay-html')
-    rafIdRef.current = requestAnimationFrame(() => setIsVisible(true))
+    let cancelled = false
+    const reveal = () => {
+      if (cancelled) return
+      rafIdRef.current = requestAnimationFrame(() => setIsVisible(true))
+    }
+    const revealFallback = setTimeout(reveal, 300)
+    window.electronAPI
+      .getConfig()
+      .then((config) => {
+        if (!cancelled) {
+          setDockEdge(resolveInitialDockEdge(config.app.overlayDocked))
+        }
+      })
+      .catch(() => {
+        // 配置读取失败不阻塞 HUD：保持全形，下一次拖拽 persist 会纠正
+      })
+      .finally(() => {
+        clearTimeout(revealFallback)
+        reveal()
+      })
     return () => {
+      cancelled = true
+      clearTimeout(revealFallback)
       if (rafIdRef.current !== null) {
         cancelAnimationFrame(rafIdRef.current)
       }
@@ -146,30 +177,6 @@ export function HUD() {
       clearWatchdog()
       clearHoldTimer()
       document.documentElement.classList.remove('overlay-html')
-    }
-  }, [])
-
-  /**
-   * 启动时恢复贴边状态：读 `app.overlayDocked`（Rust 在每次 persist / 复位时写入），
-   * 让重启后的胶囊直接以紧凑形态出现，而不是先展开再等下一次拖拽。读取是纯异步的
-   * 一次状态赋值，失败静默保持默认全形；形态过渡只发生在胶囊自身（窗口几何不变，
-   * Rust 侧 `position_overlay_persisted` 同时按原坐标复位窗口）。
-   */
-  useEffect(() => {
-    let cancelled = false
-    window.electronAPI
-      .getConfig()
-      .then((config) => {
-        if (!cancelled) {
-          const stored = config.app.overlayDocked
-          setDockEdge(isOverlayEdge(stored) ? stored : null)
-        }
-      })
-      .catch(() => {
-        // 配置读取失败不阻塞 HUD：保持全形，下一次拖拽 persist 会纠正
-      })
-    return () => {
-      cancelled = true
     }
   }, [])
 
