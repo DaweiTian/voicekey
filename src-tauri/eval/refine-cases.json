@@ -1,0 +1,122 @@
+[
+  {
+    "id": "hesitation-lead",
+    "raw": "嗯，今天下午三点开会。",
+    "names": [],
+    "fillerTokens": ["嗯"],
+    "residualAllowed": 0,
+    "keepTokens": [],
+    "expectedRules": "今天下午三点开会。",
+    "ruleCovered": true
+  },
+  {
+    "id": "names-with-hesitation",
+    "raw": "嗯，张伟和李娜负责这个项目。",
+    "names": ["张伟", "李娜"],
+    "fillerTokens": ["嗯"],
+    "residualAllowed": 0,
+    "keepTokens": [],
+    "expectedRules": "张伟和李娜负责这个项目。",
+    "ruleCovered": true
+  },
+  {
+    "id": "demonstrative-kept",
+    "raw": "我觉得那个方案还是不错的。",
+    "names": [],
+    "fillerTokens": [],
+    "residualAllowed": 0,
+    "keepTokens": ["那个"],
+    "expectedRules": "我觉得那个方案还是不错的。",
+    "ruleCovered": true
+  },
+  {
+    "id": "agreement-repeat",
+    "raw": "就是就是，你说得对。",
+    "names": [],
+    "fillerTokens": ["就是"],
+    "residualAllowed": 0,
+    "keepTokens": [],
+    "expectedRules": "你说得对。",
+    "ruleCovered": true
+  },
+  {
+    "id": "connective-kept-mid",
+    "raw": "然后，先保存一下，然后再提交。",
+    "names": [],
+    "fillerTokens": ["然后"],
+    "residualAllowed": 1,
+    "keepTokens": ["然后再提交"],
+    "expectedRules": "先保存一下，然后再提交。",
+    "ruleCovered": true
+  },
+  {
+    "id": "stutter-run",
+    "raw": "那个那个那个，今天评审需求文档。",
+    "names": [],
+    "fillerTokens": ["那个"],
+    "residualAllowed": 0,
+    "keepTokens": [],
+    "expectedRules": "今天评审需求文档。",
+    "ruleCovered": true
+  },
+  {
+    "id": "mid-sentence-demonstrative",
+    "raw": "呃，王强说那个接口下周能好。",
+    "names": ["王强"],
+    "fillerTokens": ["呃"],
+    "residualAllowed": 0,
+    "keepTokens": ["那个"],
+    "expectedRules": "王强说那个接口下周能好。",
+    "ruleCovered": true
+  },
+  {
+    "id": "hesitation-run",
+    "raw": "嗯嗯嗯，好的收到。",
+    "names": [],
+    "fillerTokens": ["嗯"],
+    "residualAllowed": 0,
+    "keepTokens": [],
+    "expectedRules": "好的收到。",
+    "ruleCovered": true
+  },
+  {
+    "id": "name-then-hesitation",
+    "raw": "陈静，嗯，麻烦发一下会议纪要。",
+    "names": ["陈静"],
+    "fillerTokens": ["嗯"],
+    "residualAllowed": 0,
+    "keepTokens": [],
+    "expectedRules": "陈静，麻烦发一下会议纪要。",
+    "ruleCovered": true
+  },
+  {
+    "id": "mid-stutter-no-comma",
+    "raw": "帮我把那个那个文件删掉。",
+    "names": [],
+    "fillerTokens": ["那个"],
+    "residualAllowed": 0,
+    "keepTokens": [],
+    "expectedRules": "帮我把文件删掉。",
+    "ruleCovered": true
+  },
+  {
+    "id": "english-clean",
+    "raw": "open the settings page and click save",
+    "names": [],
+    "fillerTokens": [],
+    "residualAllowed": 0,
+    "keepTokens": ["click save"],
+    "expectedRules": "open the settings page and click save",
+    "ruleCovered": true
+  },
+  {
+    "id": "ambiguous-kept",
+    "raw": "嗯，就是那个张伟，他说明天来。",
+    "names": ["张伟"],
+    "fillerTokens": ["嗯"],
+    "residualAllowed": 0,
+    "keepTokens": ["就是那个张伟"],
+    "expectedRules": "就是那个张伟，他说明天来。",
+    "ruleCovered": true
+  }
+]
