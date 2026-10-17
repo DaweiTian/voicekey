@@ -8,7 +8,7 @@ All notable changes to this project will be documented in this file. See [standa
 
 - **asr:** 修正本地模型就绪检查的字节数常量，根除永远误报「未下载」——`classic_files()` 的 `size_bytes` 原为估值（`model.int8.onnx` 231_000_000 / `tokens.txt` 1_000_000），而 `status()` 就绪判定与 `download_one()` 下载后校验都用**严格相等**，于是文件放对也永远 not ready、设置页下载也永远自拒（用户「从来没下载成功」的真相）。改为经 SHA-256 验证的真实值 **239_233_841** / **315_894**，并加注释说明「修改模型版本时必须同步更新」
 - **asr:** 同步修正 streaming（X-ASR）三个常量：`decoder-480ms.onnx` 40_000_000 → **11_309_084**、`joiner-480ms.onnx` 60_000_000 → **10_260_467**、`tokens.txt` 1_000_000 → **58_806**（三者均下载后 SHA-256 与代码内哈希一致，实测取值）
-- **asr:** 记录 `encoder-480ms.onnx` 为已知缺陷并**不擅自修改**——上游当前 master 提供 487_029_601 字节 / SHA-256 `cb58274b…cf52f`（modelscope 与 hf-mirror 两次下载一致），与代码内 pin 的哈希不符，说明该资产指向的是另一个修订；猜一个 size 或换哈希都会静默换掉模型修订，故留待决定（后果：streaming 引擎今日无法下载，classic/SenseVoice 引擎不受影响）
+- **asr:** `encoder-480ms.onnx` 常量对齐**代码锁定 revision** 的真实字节数 120_000_000 → **592_968_361**（本机落盘副本全 64 位 SHA-256 = 代码 pin 的 `0c345403…abc74`；modelscope 主源 2 字节 range 请求返回 `Content-Range: bytes 0-1/592968361`，且 302 指向内容寻址 LFS 对象 `0c/34/54033d…abc74`，双证一致）。同时记录**上游漂移**：作者在同一 URL 另发布过更新的 revision（采样 487_029_601 字节 / SHA-256 `cb58274b…cf52f`，两镜像步调曾不一致）；新 revision 会被 `download_one` 的 SHA-256 校验拒绝属**预期行为**——常量永远描述被 pin 的那个修订，升级 pin 时须同步改 `sha256` + `size_bytes`
 
 ## [0.5.9](https://github.com/BuildWithAIs/voicekey/compare/v0.5.8...v0.5.9) (2026-10-17)
 

@@ -59,17 +59,24 @@ fn streaming_files() -> Vec<AsrFileMeta> {
     vec![
         AsrFileMeta {
             name: "encoder-480ms.onnx".into(),
-            // KNOWN BROKEN, deliberately NOT "fixed" here (2026-10-17): the
-            // current upstream master of this URL serves 487_029_601 bytes with
-            // SHA-256 cb58274b…cf52f (downloaded twice, modelscope + hf-mirror,
-            // identical), which does not match the `sha256` pinned below - so
-            // this asset points at a different revision than the one shipped.
-            // Guessing a size (or swapping in the new hash) would silently swap
-            // the model revision, so the size stays untouched until the intended
-            // revision is decided. Consequence: streaming ASR cannot download
-            // today (the SHA-256 check in `download_one` rejects it) - the
-            // classic (SenseVoice) engine is unaffected.
-            size_bytes: 120_000_000,
+            // Real byte count of the revision this entry PINS via `sha256`
+            // below (0c345403…abc74), verified on the machine's on-disk copy
+            // (full 64-hex SHA-256 match, 592_968_361 bytes) and independently
+            // by the primary source: a 2-byte range request to the modelscope
+            // URL returns `Content-Range: bytes 0-1/592968361`, and its 302
+            // redirects to the content-addressed LFS object
+            // `0c/34/54033d249081df124ddcd7adaf3deca07d0b999b26f2ee5d2475d37abc74`
+            // (i.e. exactly this `sha256`).
+            //
+            // Upstream drift (recorded, 2026-10-17): the author also published a
+            // NEWER revision of this asset at the same URL - sampled at
+            // 487_029_601 bytes / SHA-256 cb58274b…cf52f - and the two mirrors
+            // were not always in step. A file from that newer revision is
+            // REJECTED by `download_one`'s SHA-256 check, which is the intended
+            // behaviour: the constant must always describe the pinned revision,
+            // never "whatever upstream serves today". When the pin is upgraded,
+            // change `sha256` and `size_bytes` together.
+            size_bytes: 592_968_361,
             sha256: "0c3454033d249081df124ddcd7adaf3deca07d0b999b26f2ee5d2475d37abc74".into(),
             urls: vec![
                 "https://www.modelscope.ai/models/Gilgamesh-J/X-ASR-zh-en/resolve/master/deployment/models/chunk-480ms-model/encoder-480ms.onnx".into(),
