@@ -385,26 +385,29 @@ fn clear_dwm_window_backdrop<R: tauri::Runtime>(window: &WebviewWindow<R>) {
     }
 }
 
-/// Clear the WebView2 "ghost titlebar" that WebView2 runtime 144+ paints over a
-/// transparent window ([tauri#14764], upstream [WebView2Feedback#5492]).
+/// Stale-bar mitigation for the WebView2 144.x "ghost titlebar" regression
+/// ([tauri#14764], upstream [WebView2Feedback#5492]) - **hidden-state only**.
 ///
-/// Why this exists: after the native caption is stripped
-/// ([`strip_native_frame`]) and DWM's opaque base is cleared
-/// ([`clear_dwm_window_backdrop`]), a *third*, independent layer can still show
-/// a light bar carrying the page `<title>` text above the capsule. That bar
-/// follows the capsule while dragging and (re)appears on any activation / focus
-/// change - opening the settings window, switching apps. It is **not** a window
-/// style: `GWL_STYLE` already reports `WS_CAPTION` absent while the bar stays
-/// painted, which is exactly why two rounds of style stripping could not remove
-/// it. It is a WebView2 144.x regression, fixed upstream in Edge 146 / stable
-/// but still live on unpatched runtimes.
+/// **INVARIANT (0.5.9): call this ONLY while the window is hidden.** The nudge is
+/// a 1px bounds change, and a bounds change on a *visible* transparent window
+/// makes WebView2 present a white frame (WebView2Feedback#5607) - that was our
+/// "点击瞬间白条/白闪" bug, whose source was the `Focused`-path sweep that
+/// resized both visible capsules on every focus event (`clear_capsule_ghost_titlebars`,
+/// removed in 0.5.9). While the window is hidden the same repaint is simply
+/// invisible, so the mitigation costs nothing.
 ///
-/// The one reliable cure reported upstream is a **resize** (the issue records
-/// that resizing the window makes the bar disappear, and our own symptom
-/// matches: deforming the capsule - which resizes the window - clears it). So
-/// nudge the window's height by one physical pixel and immediately back:
-/// WebView2 repaints the host surface and drops the stale bar. Cheap and
-/// idempotent.
+/// Why it still exists at all: on WebView2 144.x a *third*, independent layer
+/// could show a light bar carrying the page `<title>` above the capsule (not a
+/// window style - `GWL_STYLE` reports `WS_CAPTION` absent while the bar is
+/// painted), and the one reliable cure reported upstream is a **resize**. Edge
+/// **146 fixed that regression upstream** (the field machine now runs 155, where
+/// the bar no longer exists), so on a patched runtime this is a cheap no-op kept
+/// only for users still on an unpatched 144.x runtime. It is deliberately
+/// **not** on the focus path any more: `WS_EX_NOACTIVATE` + `focusable:false`
+/// stop *activation*, but they do not stop WebView2's child window from taking
+/// focus and tao from emitting `Focused` - so a focus-path nudge fires on every
+/// focus event (the field log showed 7 visible-window bounds changes in 10s) and
+/// each one is a white-frame opportunity.
 ///
 /// The re-entrancy guard is essential: the nudge fires `Resized`, and any
 /// `Resized` handler that itself nudged would loop forever (an upstream
@@ -493,8 +496,8 @@ pub fn harden_overlay_window<R: tauri::Runtime>(_window: &WebviewWindow<R>) {}
 #[cfg(not(target_os = "windows"))]
 pub fn harden_main_window<R: tauri::Runtime>(_window: &WebviewWindow<R>) {}
 
-/// Non-Windows stub: the WebView2 ghost-titlebar regression is Windows-only, so
-/// there is nothing to clear elsewhere.
+/// Non-Windows stub: the WebView2 stale-bar mitigation is Windows-only, so
+/// there is nothing to do elsewhere.
 #[cfg(not(target_os = "windows"))]
 pub fn clear_webview_ghost_titlebar<R: tauri::Runtime>(_window: &WebviewWindow<R>) {}
 
@@ -517,10 +520,11 @@ pub fn clear_webview_ghost_titlebar<R: tauri::Runtime>(_window: &WebviewWindow<R
 ///   transparent window results in a white flash when displayed"; also
 ///   WebView2Feedback#5607: a white flash "when transforming the bounds of the
 ///   WebView or any other changes to it ... When showing it it's fine").
-/// * **a bounds change** - our own ghost-titlebar nudge
-///   ([`clear_webview_ghost_titlebar`]) resizes the window by 1px on every show
-///   and focus change, which is a bounds change on a *visible* transparent
-///   window: the flash side effect of the 0.5.6 white-bar workaround.
+/// * **a bounds change** - the stale-bar nudge
+///   ([`clear_webview_ghost_titlebar`]) resizes the window by 1px; it is only
+///   ever run while the window is **hidden** (see that function's invariant),
+///   because on a *visible* transparent window the same bounds change is what
+///   made WebView2 present a white frame (the 0.5.9 bug).
 ///
 /// `wry` already sets `DefaultBackgroundColor` to transparent for
 /// `transparent: true` windows, but it does so through the *property*

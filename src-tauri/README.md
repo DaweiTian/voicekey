@@ -42,7 +42,9 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   （= `0xFFFF_FFFE`；`DWMWA_COLOR_DEFAULT`=`0xFFFF_FFFF` 反而恢复强调色，勿用）。由 `lib.rs` 的
   `Focused` 事件处理器对**获焦窗口**按其 label 重申 hardening（main→`harden_main_window`、
   overlay/session→`harden_overlay_window`，均幂等且廉价）解决；overlay 与 session 因
-  `WS_EX_NOACTIVATE` 通常不获焦，同设仅为预防。该属性需 Win11 build 22000+，旧系统静默忽略——已加 HRESULT `< 0` 检查 +
+  `WS_EX_NOACTIVATE` 通常不获焦，同设仅为预防。**该分支只做硬化重申与 `focused` 插桩，绝不
+  再做任何几何变更**（0.5.9 删掉了原先在此的 `clear_capsule_ghost_titlebars` 幽灵清扫——它位移
+  可见胶囊窗，正是点按瞬间白条的来源；详见 windowing 条目「0.5.9 根因定案」）。该属性需 Win11 build 22000+，旧系统静默忽略——已加 HRESULT `< 0` 检查 +
   `log::warn!` 便于诊断。**回归警示**：
   `DWMWA_COLOR_NONE` 必须使用 windows-sys 导出的常量（= `0xFFFF_FFFE`，MSDN
   DWMWINDOWATTRIBUTE）；早前手写错误字面量 `0x0100_0000` 被 DWM 当作 COLORREF，
@@ -55,24 +57,54 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   记为「死配置」有误），且 tauri 官方文档把它列为**透明窗白闪**的官方规避手段
   （`transparent()` / `no_redirection_bitmap()` 两处 doc 原文："can avoid the white flash
   that may appear before the webview content is rendered when using a transparent
-  window"）；该字段只在 Windows 生效（mac/Linux 忽略）。**但 0.5.7 评估后否决、不启用**
-  （沿用「评估但推迟」的记录风格）：tauri 文档推荐它规避白闪，但把它打开会让窗口失去重定向
-  表面（DComp-only），而 **wry 的 WebView2 容器正是子窗**（`create_container_hwnd` 用
-  `WS_CHILD | WS_CLIPCHILDREN` 建 `WRY_WEBVIEW` 子窗）。两条反证：① Sciter 官方论坛实证——
-  `WS_EX_NOREDIRECTIONBITMAP`（DComp）窗口"highly probably affects child window rendering"，
-  他们被迫关掉 DComp 才恢复子窗渲染；② wry 自身历史——#1513 曾默认给 WebView2 传
-  `--enable-features=RemoveRedirectionBitmap`（浏览器旗标变体）→ #1525 多平台崩溃 →
-  **#1572 又移除**（"due to crashes on Insider builds"）。取舍：**空白胶囊（功能破坏）> 闪烁
-  （外观）**，故 0.5.7 改走「不重建表面 / 不可见重建」路线（见下文「白闪」②③），不碰透明机制。**WebView2 幽灵标题栏（0.5.4 残留白条的根因）**：样式剥离 + DWM 清理之后，胶囊
+  window"）；该字段只在 Windows 生效（mac/Linux 忽略）。**0.5.9 起 overlay + session 双胶囊窗
+  全部启用**（两处 `"noRedirectionBitmap": true`：先只在 session 试验、A/B 收敛后补齐 overlay）。
+  **A/B 实机收敛证据**：① session 窗带该标志 → 用户全部测试轮次多轮录音正常渲染，**从未**出现
+  白条 / 白闪 / 空白；② overlay 窗不带 → 实机截图显示待机胶囊（`按住说话`）正上方一条**常驻**
+  浅蓝白横条、条内左侧「芷若」文字，占据 420×96 窗的顶部区域（@1.5x 截图 ≈637×150，与窗几何
+  吻合）——即宿主窗口标题层的**幽灵标题栏本体**；③ 0.5.9-1 摘除 focus 路径的可见窗轻推后，该条
+  **由「一闪而过」转为「常驻」**（此前每次 Focused 的 1px 位移把它擦掉）——因果链闭合。
+  **结论：病灶 = 窗口 redirection bitmap 缓存了带标题栏的旧帧**，正是 #14831/#15490 里 tauri
+  维护者推荐 `noRedirectionBitmap` 的病类。**0.5.7 记录的 Sciter 反证（DComp 会影响 wry 的
+  WebView2 `WS_CHILD` 子窗合成）对本栈（WebView2 155 + wry 0.57）正式判定为「不成立 / 已证伪」**
+  ——实机证据（155 + 双窗带标志渲染完全正常）胜过论坛间接推断；wry 那段历史（#1513 传
+  `--enable-features=RemoveRedirectionBitmap` → #1525 崩溃 → **#1572 移除**）是**浏览器旗标
+  变体**的问题，与 `WS_EX_NOREDIRECTIONBITMAP` 窗口样式路径不同，同样不再作为否决依据。
+  **回退步骤**：删掉 `overlay` 与 `session` 条目各一行 `"noRedirectionBitmap": true`（其余不动）。
+  **失败判据（务必先看）**：若任一胶囊窗**内容空白 / 不渲染**，立即删掉该窗那一行并重建。
+  **全链插桩**：`windowing::trace()` 把窗口操作直接追加进
+  `voice-key.log`（渲染层 `log` 命令写的同一个文件——注意 Rust `log::*` 走的是 stderr，
+  **不会**进这个文件，故不能用 `log::debug!` 代替），输出 `[win]` 行：session start 入口、
+  overlay/session show 全链（含「已可见短路」分支）、每次 ghost-nudge（带 label，只在隐藏态）、
+  `session hide` 的 park 坐标、`focused label=… focused=…`；每会话约 6-9 行，
+  无转写/凭据，永久保留供后续白闪/白条/焦点问题定案。**WebView2 幽灵标题栏（0.5.4 残留白条的根因）**：样式剥离 + DWM 清理之后，胶囊
   上方仍可能出现一条浅色横条（横条文字 = 页面 `<title>`，即「芷若」）、随胶囊拖动、并在窗口
   激活 / 聚焦切换时出现、点胶囊（触发形变 = resize）或切走后又消失。它**不是窗口样式**
   （`GWL_STYLE` 已无 `WS_CAPTION`，正是两轮样式剥离除不掉的原因），而是 **WebView2 运行时
   144.x 回归**（tauri#14764 / WebView2Feedback#5492；Edge 146 起上游已修，未升级运行时的机器
-  仍在）。**清除（masking）手段**是**改变窗口尺寸**：`clear_webview_ghost_titlebar` 对胶囊做一次
+  仍在）。**0.5.9 实机更正**：用户机运行时 **155** 上该条**仍复现，且为「常驻」**（实机截图：
+  待机胶囊正上方一条浅蓝白横条、条内左侧「芷若」文字）——说明上游 146 的修复**未覆盖此变体**；
+  本栈最终解 = **双胶囊窗 `noRedirectionBitmap`**（窗口 redirection bitmap 不再缓存带标题栏的旧
+  帧，见上「A/B 实机收敛证据」），隐藏态轻推自此退化为对 144.x 老运行时的廉价兜底。**清除（masking）手段**是**改变窗口尺寸**：`clear_webview_ghost_titlebar` 对胶囊做一次
   「高度 +1 再还原」的 1px 轻推 —— 带 `AtomicBool` 重入守卫（轻推会触发 `Resized`，若
-  `Resized` 处理器也轻推即死循环），挂在每次 `overlay_show` / `session_show`
-  （`show_overlay_window` / `show_session_window`）与
-  overlay/session/main 三窗口的 `Focused` 事件（`lib.rs`，激活路径）上；胶囊隐藏时跳过。
+  `Resized` 处理器也轻推即死循环）。**0.5.9 起只在 `overlay_show` / `session_show`
+  （`show_overlay_window` / `show_session_window`）的「窗口仍隐藏」阶段调用，且 `overlay`
+  路径也已改成 `harden → position → 轻推（隐藏态）→ show → harden`**；**不再挂 `Focused`
+  事件**（见下「0.5.9 根因定案」）。**新不变量：任何情况下不得对【可见】胶囊窗做 bounds 位移。**
+  **0.5.9 根因定案（点按瞬间的「闪」＝我们自己造的；条本体仍在 155 上）**：主代理读本机 `voice-key.log`
+  的 `[win]` 插桩，时间戳严丝合缝——13:06:47.917 `focused label=overlay focused=true` →
+  `ghost-sweep (focus path)` → 13:06:47.918 `ghost-nudge label=overlay size=420x96`（**位移的是
+  可见的 overlay 窗**）→ 13:06:48.006 `session start: entry (HUD tap)`；另有 focus 事件风暴
+  （13:05:51.955–52.005 内 main/background/overlay 共 7 次 Focused，每次都对可见 overlay 轻推）
+  与单次点按共 3-4 次可见窗位移。**0.5.8 的 `WS_EX_NOACTIVATE`/`focusable:false` 挡的是「激活」，
+  挡不住 Focused 事件**（WebView2 子窗点击即取焦，tao 照样发 Focused）→ 于是 focus 路径上的
+  `clear_capsule_ghost_titlebars` 每事件位移一次可见窗，而 bounds 变化正是 WebView2 出白帧的
+  文档化触发面（WebView2Feedback#5607）；而它针对的幽灵标题栏在用户机 **155** 上**仍在**（见上
+  「0.5.9 实机更正」：条本体一直存在，只是每次 Focused 的位移把它擦掉才表现为「一闪」）——
+  **补丁本身成了闪烁病灶**（擦掉→闪；0.5.9-1 摘除后条转为常驻），最终由**双窗
+  `noRedirectionBitmap`** 从源头消除（redirection bitmap 不再缓存带标题栏的旧帧）。修法：删掉 `lib.rs` Focused 分支的
+  `clear_capsule_ghost_titlebars`（连带函数一并删除，零残留 dead code），overlay 显示路径的轻推
+  挪到 `show()` 之前，隐藏态调用保留（对 144.x 老运行时仍是廉价兜底，对 155 是无害 no-op）。
   **0.5.8 根因定案（点击瞬间残留「芷若」白条的真正触发源）**：`WebviewWindow::show()` →
   tao `WindowState::set_window_flags(VISIBLE)` → `apply_diff` 会**先整字覆写**
   `SetWindowLongW(GWL_STYLE/GWL_EXSTYLE, to_window_styles())` **再** `ShowWindow(SW_SHOW)`；

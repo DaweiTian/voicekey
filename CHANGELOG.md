@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.9](https://github.com/BuildWithAIs/voicekey/compare/v0.5.8...v0.5.9) (2026-10-17)
+
+### Bug Fixes
+
+- **overlay:** 根除胶囊上方的**常驻「芷若」白条**（幽灵标题栏本体）——overlay + session **双胶囊窗启用 `noRedirectionBitmap`**（`WS_EX_NOREDIRECTIONBITMAP`，仅 Windows 生效；tauri 维护者推荐 + #15410 配置项）。A/B 实机收敛：session 先启用后多轮录音渲染完全正常、从未出现白条/白闪/空白；overlay 未启用时实机截图显示待机胶囊正上方一条**常驻**浅蓝白横条（条内左侧「芷若」文字，占 420×96 窗顶部区域），且 0.5.9-1 摘除可见窗轻推后该条**由「一闪而过」转为「常驻」**——病灶即窗口 redirection bitmap 缓存了带标题栏的旧帧（tauri#14831/#15490 病类）。本机运行时 155 仍复现该条，说明上游 146 的修复未覆盖此变体；0.5.7 记录的 Sciter 否决（DComp 影响 wry 的 WebView2 子窗合成）由实机证据判定不成立。一行可回退（删对应窗那一行），失败判据=该窗内容空白则立即回退
+- **overlay:** 摘除焦点路径的幽灵清扫，**根除点按胶囊瞬间的「闪」**（补丁即闪烁病灶）——本机 `voice-key.log` 插桩时间戳严丝合缝：`focused label=overlay focused=true` → `ghost-sweep (focus path)` → `ghost-nudge label=overlay size=420x96`（位移的是**可见**窗）→ `session start`；focus 风暴内 10 秒 7 次可见窗位移、单次点按 3-4 次。0.5.8 的 `WS_EX_NOACTIVATE`/`focusable:false` 只挡「激活」不挡 Focused 事件（WebView2 子窗点击即取焦），而该轻推把一直存在的幽灵条每次擦掉、于是表现为「闪」——摘除后条转为常驻，再由双窗 `noRedirectionBitmap` 从源头消除。删函数（零残留 dead code）+ overlay 显示路径轻推前置到隐藏态（对 144.x 老运行时仍是廉价兜底）；**新不变量：不得对可见胶囊窗做 bounds 位移**
+- **overlay:** 窗口操作全链插桩——`windowing::trace()` 直接追加 `[win]` 行到 `voice-key.log`（session start 入口、overlay/session show 全链、每次 ghost-nudge、session hide 的 park 坐标、Focused 事件），用于把白闪时间戳与窗口操作对齐定案；注意 Rust `log::*` 走 stderr 不进该文件
+
 ## [0.5.8](https://github.com/BuildWithAIs/voicekey/compare/v0.5.7...v0.5.8) (2026-10-17)
 
 ### Bug Fixes

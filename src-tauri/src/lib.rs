@@ -10,8 +10,6 @@ mod llm;
 mod mouse;
 mod platform;
 mod refine_prompt;
-#[cfg(test)]
-mod refine_eval;
 mod state;
 mod stats;
 mod translate;
@@ -21,29 +19,6 @@ mod windowing;
 
 use state::AppState;
 use tauri::Manager;
-
-/// Clear the WebView2 "ghost titlebar" on a capsule window (overlay or
-/// session) after a focus / activation change
-/// ([`windowing::clear_webview_ghost_titlebar`], tauri#14764). Called from
-/// every window's `Focused` event: the reported triggers are opening the
-/// settings page and switching windows, both of which change activation.
-///
-/// Skipped while the target capsule is hidden - the stale bar can only be
-/// visible when the window is on screen, so repainting it otherwise is wasted
-/// work (and would resize a hidden window on every app activation).
-fn clear_capsule_ghost_titlebars<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    windowing::trace("ghost-sweep (focus path)");
-    for label in [
-        windowing::OVERLAY_WINDOW_LABEL,
-        windowing::SESSION_WINDOW_LABEL,
-    ] {
-        if let Some(win) = app.get_webview_window(label) {
-            if win.is_visible().unwrap_or(false) {
-                windowing::clear_webview_ghost_titlebar(&win);
-            }
-        }
-    }
-}
 
 pub fn run() {
     env_logger::init();
@@ -111,9 +86,15 @@ pub fn run() {
                         windowing::harden_overlay_window(&win);
                     }
                 }
-                // A focus change is also what (re)triggers the WebView2 ghost
-                // titlebar over the transparent capsule (tauri#14764).
-                clear_capsule_ghost_titlebars(app);
+                // NOTE: the focus path used to run `clear_capsule_ghost_titlebars`
+                // here (a 1px resize of both capsules). That was the white-flash
+                // bug: a bounds change on a *visible* transparent window makes
+                // WebView2 present a white frame (WebView2Feedback#5607), and the
+                // patch was aimed at the 144.x ghost titlebar, which the upstream
+                // fix in Edge 146 already removed (the field machine runs 155).
+                // Removed in 0.5.9 - never re-add a bounds change on a visible
+                // capsule. The stale-bar mitigation now only ever runs while the
+                // capsule is hidden (`show_overlay_window` / `show_session_window`).
             }
             // Closing the main window hides it to the tray and arms a 5-minute
             // delayed destroy of its WebView (`windowing`); reopening rebuilds

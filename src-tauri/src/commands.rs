@@ -646,20 +646,21 @@ fn overlay_show<R: tauri::Runtime>(app: &AppHandle<R>, force: bool) {
 /// Harden, position and show one existing overlay window, then sync the
 /// persisted visibility flag to what actually happened.
 ///
-/// **0.5.7 white-flash fix:** when the capsule is *already* on screen - the
-/// normal case, since the standby capsule is shown once at startup and stays up,
-/// and every session start calls this path again through
-/// `start_session_internal` - the `show()` + ghost-titlebar nudge below are
-/// skipped. `show()` on an already visible window buys nothing, and the nudge is
-/// a **1px bounds change on a visible transparent window**, which is precisely
-/// what makes WebView2/DWM present a frame before the page content for the new
-/// bounds exists: the white flash reported after 0.5.6 (the nudge is the only
-/// geometry mutation 0.5.6 added on the click/start path). The nudge is only
-/// meaningful around a *visibility change*, because that is what re-creates the
-/// WebView2 surface and re-triggers the ghost titlebar (tauri#14764). The
-/// Windows hardening is skipped here too: it was applied when the window was
-/// shown, it is idempotent, and `lib.rs`'s `Focused` handler re-asserts it on
-/// every activation - the only event that redraws the DWM focus border.
+/// **INVARIANT (0.5.9): no bounds change is ever applied to a *visible*
+/// capsule.** A 1px resize of a visible transparent window is what makes
+/// WebView2 present a white frame (WebView2Feedback#5607) - that was the
+/// "点击瞬间白条/白闪" bug, and the patch that did it
+/// (`clear_capsule_ghost_titlebars` on the `Focused` path) is gone. The
+/// stale-bar mitigation therefore runs **before `show()`**, while the window is
+/// still hidden, exactly like [`show_session_window`].
+///
+/// **0.5.7 shortcut:** when the capsule is *already* on screen - the normal case,
+/// since the standby capsule is shown once at startup and stays up, and every
+/// session start calls this path again through `start_session_internal` - only
+/// `position_overlay` + the flag sync run: `show()` on an already visible window
+/// buys nothing, and hardening was applied when it was shown (and is re-asserted
+/// by `lib.rs`'s `Focused` handler, the only event that redraws the DWM focus
+/// border).
 fn show_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>, win: &WebviewWindow<R>) {
     let already_visible = win.is_visible().unwrap_or(false);
     if already_visible {
@@ -672,16 +673,20 @@ fn show_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>, win: &WebviewWindo
         sync_overlay_visibility_flag(app, true);
         return;
     }
-    crate::windowing::trace("overlay show: hidden -> harden+position+show+harden+nudge");
+    crate::windowing::trace("overlay show: hidden -> harden+position+nudge(hidden)+show+harden");
     crate::windowing::harden_overlay_window(win);
     position_overlay(app, win);
+    // Stale-bar mitigation while the window is still HIDDEN, mirroring
+    // `show_session_window`: the 1px nudge is a bounds change, and a bounds
+    // change on a *visible* transparent window is what makes WebView2 present a
+    // white frame (WebView2Feedback#5607) - that was the 0.5.9 white-flash bug.
+    // A hidden window's repaint cannot be seen. The mitigation itself is only
+    // relevant for WebView2 runtimes older than Edge 146 (the 144.x ghost
+    // titlebar, tauri#14764); on a patched runtime it is a cheap no-op.
+    // INVARIANT: never call this after `show()`.
+    crate::windowing::clear_webview_ghost_titlebar(win);
     if win.show().is_ok() {
         crate::windowing::harden_overlay_window(win);
-        // WebView2 runtime 144+ repaints a stale "ghost titlebar" carrying the
-        // page title over the transparent capsule on any activation
-        // (tauri#14764); a resize clears it, so nudge once here as well as on
-        // every focus change (lib.rs). Guarded and idempotent.
-        crate::windowing::clear_webview_ghost_titlebar(win);
         sync_overlay_visibility_flag(app, true);
     }
 }
