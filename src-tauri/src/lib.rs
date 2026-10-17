@@ -10,6 +10,8 @@ mod llm;
 mod mouse;
 mod platform;
 mod refine_prompt;
+#[cfg(test)]
+mod refine_eval;
 mod state;
 mod stats;
 mod translate;
