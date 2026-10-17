@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { AudioLines, Check, Globe, Mic, Sparkles, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { OverlayProcessingStage, OverlayState } from '@/shared/types'
@@ -16,7 +16,8 @@ import { Waveform } from './Waveform'
  *
  * 事件经 `app.emit` 广播天然送达本窗（`overlay-update` / `audio-level`），
  * 与 overlay 窗各听各的；本组件**只渲染，不开关窗口**（窗口生命周期权威在
- * Rust 侧）。视觉 / 交互与拆分前的 overlay 会话态胶囊逐像素一致。
+ * Rust 侧）。视觉 / 交互与拆分前的 overlay 会话态胶囊基本一致，并补了入场
+ * 与态间动效。
  */
 
 /**
@@ -109,7 +110,7 @@ function ProcessingBadge({ stage }: { stage: OverlayProcessingStage | undefined 
 /** 成功：绿色小勾圆章 */
 function SuccessBadge() {
   return (
-    <span className="hud-pop flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-400/12 text-emerald-400 ring-1 ring-emerald-400/30 ring-inset">
+    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-400/12 text-emerald-400 ring-1 ring-emerald-400/30 ring-inset">
       <Check className="h-3.5 w-3.5" strokeWidth={3} />
     </span>
   )
@@ -118,7 +119,7 @@ function SuccessBadge() {
 /** 错误：红色小叉圆章 */
 function ErrorBadge() {
   return (
-    <span className="hud-pop flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-red-500/12 text-red-400 ring-1 ring-red-400/30 ring-inset">
+    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-red-500/12 text-red-400 ring-1 ring-red-400/30 ring-inset">
       <X className="h-3.5 w-3.5" strokeWidth={2.5} />
     </span>
   )
@@ -128,17 +129,10 @@ export function SessionHUD() {
   const { t } = useTranslation()
   const [overlayState, setOverlayState] = useState<OverlayState>({ status: 'idle' })
   const [audioLevel, setAudioLevel] = useState(0)
-  const [isVisible, setIsVisible] = useState(false)
-  /** 入场动画的 rAF 句柄，卸载时取消。 */
-  const rafIdRef = useRef<number | null>(null)
 
   useEffect(() => {
     document.documentElement.classList.add('overlay-html')
-    rafIdRef.current = requestAnimationFrame(() => setIsVisible(true))
     return () => {
-      if (rafIdRef.current !== null) {
-        cancelAnimationFrame(rafIdRef.current)
-      }
       document.documentElement.classList.remove('overlay-html')
     }
   }, [])
@@ -190,17 +184,16 @@ export function SessionHUD() {
           className={cn(
             'pointer-events-auto relative flex h-[52px] w-[268px] items-center gap-2.5 rounded-full',
             'bg-neutral-950/90 px-3 ring-1 ring-white/[0.06]',
-            'transition-[opacity,transform,filter] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]',
-            isVisible
-              ? 'translate-y-0 scale-100 opacity-100 blur-0'
-              : 'translate-y-2 scale-95 opacity-0 blur-sm',
+            'hud-enter',
           )}
         >
-          {/* Left status badge */}
-          {status === 'recording' && <RecordingBadge audioLevel={audioLevel} />}
-          {status === 'processing' && <ProcessingBadge stage={processingStage} />}
-          {status === 'success' && <SuccessBadge />}
-          {status === 'error' && <ErrorBadge />}
+          {/* Left status badge —— key={status} 触发每次状态变化重新挂载并播放 hud-pop */}
+          <span key={status} className="inline-flex hud-pop">
+            {status === 'recording' && <RecordingBadge audioLevel={audioLevel} />}
+            {status === 'processing' && <ProcessingBadge stage={processingStage} />}
+            {status === 'success' && <SuccessBadge />}
+            {status === 'error' && <ErrorBadge />}
+          </span>
 
           {/* Single-line status text */}
           {status === 'recording' &&

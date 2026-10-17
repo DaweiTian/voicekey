@@ -571,6 +571,23 @@ html.vk-theme-changing *::after {
 .hud-caret {
   animation: hud-caret 1s ease-in-out infinite;
 }
+
+/* 会话胶囊入场：mount 时从下方淡入并轻微放大，避开 WebView2 首帧白底（75ms 延迟） */
+.hud-enter {
+  animation: hud-enter 200ms cubic-bezier(0.23, 1, 0.32, 1) 75ms both;
+}
+@keyframes hud-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.93);
+    filter: blur(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
 @keyframes hud-caret {
   0%,
   100% {
@@ -598,7 +615,8 @@ html.vk-theme-changing *::after {
 
 @media (prefers-reduced-motion: reduce) {
   .hud-caret,
-  .hud-pop {
+  .hud-pop,
+  .hud-enter {
     animation: none;
   }
 }

@@ -18,6 +18,17 @@
 //!    ([`clear_dwm_window_backdrop`]) so DWM cannot composite an opaque
 //!    rectangle behind the capsule. Every helper is idempotent so it can be
 //!    re-applied on each show without side effects.
+//!
+//!    **The capsules must also be non-focusable** (`focusable: false` in
+//!    `tauri.conf.json` + `.focusable(false)` in the rebuild builders + the
+//!    `set_focusable(false)` assertion in [`harden_overlay_window`]). tao
+//!    rewrites the whole `GWL_EXSTYLE` word from its own computed styles on any
+//!    flag change - and `show()` is such a change - carrying `WS_EX_NOACTIVATE`
+//!    only when the window is *not* focusable. A focusable capsule therefore
+//!    loses `WS_EX_NOACTIVATE` right before tao's `ShowWindow(SW_SHOW)` and gets
+//!    **activated**, which is the documented trigger of the WebView2 ghost
+//!    titlebar (tauri#14764). Non-focusable keeps the bit in tao's own styles,
+//!    so no show can activate a capsule.
 //! 2. **Main window hide-to-tray lifecycle.** Closing the main window hides it
 //!    to the tray and arms a [`MAIN_DESTROY_DELAY`] timer that destroys the
 //!    whole main WebView process to reclaim memory. Reopening (tray menu /
@@ -388,8 +399,40 @@ pub fn clear_webview_ghost_titlebar<R: tauri::Runtime>(window: &WebviewWindow<R>
 /// DWM paint an opaque system backdrop / rounded base behind it. Idempotent;
 /// call before *and* after every show so a missed setup pass or a style reset
 /// can never leave a visible frame or an opaque rectangle.
+///
+/// **0.5.8: the window is also asserted non-focusable, and that is the root fix
+/// for the residual "white titlebar with 芷若" flash on click.** `prevent_activation`
+/// below sets `WS_EX_NOACTIVATE` with `SetWindowLongPtrW`, but tao *rewrites the
+/// whole style word* on any flag change: `WebviewWindow::show()` ->
+/// `tao::WindowState::set_window_flags(VISIBLE)` -> `apply_diff`, which calls
+/// `SetWindowLongW(GWL_EXSTYLE, to_window_styles().1)` and only *then*
+/// `ShowWindow(SW_SHOW)`. tao's computed styles carry `WS_EX_NOACTIVATE` **only
+/// when the window is not focusable** (`if !flags.contains(FOCUSABLE)`), and
+/// tauri's `focusable` defaults to `true` - so the ex-style write **wiped our
+/// `WS_EX_NOACTIVATE` and `ShowWindow(SW_SHOW)` was then free to activate the
+/// capsule**. Activation is exactly the documented trigger of the WebView2 ghost
+/// titlebar (tauri#14764: "drag or focus change"), whose text is the page
+/// `<title>` - the white bar with 芷若 the user sees at the moment of the click
+/// (that is the only moment a capsule is shown). 0.5.6 masked it with a
+/// post-`show()` clearing nudge (the same nudge that produced the 0.5.7 white
+/// *background* frame); 0.5.7 moved that nudge before the show, so the bar it
+/// used to clear became visible again.
+///
+/// `set_focusable(false)` makes tao's own style computation keep
+/// `WS_EX_NOACTIVATE` forever, so no `show()` can activate the capsule, so the
+/// ghost is never triggered - no post-`show()` geometry change is needed (and
+/// 0.5.7's white-flash fix stays intact). It is also the *correct* declaration
+/// of what these capsules are: they are `WS_EX_NOACTIVATE` by design, they have
+/// no keyboard interaction (mouse input is unaffected), and this closes the
+/// latent focus-stealing bug where a session start could pull the foreground
+/// away from the app the user is dictating into. The `focusable: false` entry in
+/// `tauri.conf.json` (and `.focusable(false)` in the two rebuild builders) is
+/// the declarative half; this assertion is the belt-and-braces that keeps the
+/// invariant no matter how the window was created.
 #[cfg(target_os = "windows")]
 pub fn harden_overlay_window<R: tauri::Runtime>(window: &WebviewWindow<R>) {
+    // Idempotent: a no-op once tao's FOCUSABLE flag is already false.
+    let _ = window.set_focusable(false);
     prevent_activation(window);
     suppress_focus_frame(window);
     strip_native_frame(window);
@@ -700,6 +743,11 @@ fn build_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
+    // Keep in sync with the `overlay` entry in `tauri.conf.json`: the capsule
+    // must be non-focusable so tao's own style writes keep `WS_EX_NOACTIVATE`
+    // (see `harden_overlay_window` - a focusable window is activated by
+    // `ShowWindow(SW_SHOW)` and WebView2 then paints its ghost titlebar).
+    .focusable(false)
     .visible(false)
     .build()?;
 
@@ -781,6 +829,11 @@ fn build_session_window<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
+    // Same as `build_overlay_window`: non-focusable, so tao's style writes keep
+    // `WS_EX_NOACTIVATE` and `show()` cannot activate the capsule (activating it
+    // is what makes WebView2 paint its ghost titlebar). Keep in sync with the
+    // `session` entry in `tauri.conf.json`.
+    .focusable(false)
     .visible(false)
     .build()?;
 

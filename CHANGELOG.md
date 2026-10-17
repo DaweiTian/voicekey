@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.8](https://github.com/BuildWithAIs/voicekey/compare/v0.5.7...v0.5.8) (2026-10-17)
+
+### Bug Fixes
+
+- **overlay:** 修复点击开启录音瞬间闪现「芷若」白色标题栏——根因为窗口 show() 时 tao 整字重写扩展样式，focusable 默认 true 使 WS_EX_NOACTIVATE 被抹除、SW_SHOW 激活窗口触发 WebView2 幽灵标题栏；待机与会话双胶囊窗声明为不可聚焦（配置 + 重建路径 + harden 幂等断言），顺带修复录音启动时抢走前台应用焦点
+- **ui:** 开录与状态过渡动效自然化——会话大胶囊入场淡入缩放上滑（约 200ms、避开 WebView 首帧延迟）、待机胶囊按压反馈、状态圆章沿用 hud-pop 弹性衔接；纯内容层动画，窗口几何零改动
+
 ## [0.5.7](https://github.com/BuildWithAIs/voicekey/compare/v0.5.6...v0.5.7) (2026-10-17)
 
 ### Bug Fixes

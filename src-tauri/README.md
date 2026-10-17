@@ -27,7 +27,9 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   `SWP_FRAMECHANGED` 提交——tao 给每个窗口都带这些位、只靠收起非客户区隐藏，一旦存在
   非客户区 Windows 就会画原生标题栏（最小化/还原/关闭三键）；overlay 另在
   `tauri.conf.json` 用 `"shadow": false` 消除该非客户区（默认 `shadow: true` 会给无装饰
-  窗口加 DWM 边框/阴影/圆角），此处样式剥离作二次兜底；overlay 另调
+  窗口加 DWM 边框/阴影/圆角），此处样式剥离作二次兜底；两胶囊另用 `"focusable": false`
+  （见下文幽灵标题栏「0.5.8 根因定案」：可聚焦窗口会在 `show()` 时被 tao 覆写掉
+  `WS_EX_NOACTIVATE` 而遭激活）；overlay 另调
   `clear_dwm_window_backdrop` 用 `DWMWA_NCRENDERING_POLICY=DWMNCRP_DISABLED`、
   `DWMWA_WINDOW_CORNER_PREFERENCE=DWMWCP_DONOTROUND`、`DWMWA_SYSTEMBACKDROP_TYPE=DWMSBT_NONE`
   清掉 DWM 自绘的不透明底——Win11 默认 `DWMSBT_AUTO` 会给无边框置顶 `WS_POPUP` 胶囊
@@ -66,11 +68,27 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   激活 / 聚焦切换时出现、点胶囊（触发形变 = resize）或切走后又消失。它**不是窗口样式**
   （`GWL_STYLE` 已无 `WS_CAPTION`，正是两轮样式剥离除不掉的原因），而是 **WebView2 运行时
   144.x 回归**（tauri#14764 / WebView2Feedback#5492；Edge 146 起上游已修，未升级运行时的机器
-  仍在）。唯一可靠解法是**改变窗口尺寸**：`clear_webview_ghost_titlebar` 对 overlay 做一次
+  仍在）。**清除（masking）手段**是**改变窗口尺寸**：`clear_webview_ghost_titlebar` 对胶囊做一次
   「高度 +1 再还原」的 1px 轻推 —— 带 `AtomicBool` 重入守卫（轻推会触发 `Resized`，若
   `Resized` 处理器也轻推即死循环），挂在每次 `overlay_show` / `session_show`
   （`show_overlay_window` / `show_session_window`）与
   overlay/session/main 三窗口的 `Focused` 事件（`lib.rs`，激活路径）上；胶囊隐藏时跳过。
+  **0.5.8 根因定案（点击瞬间残留「芷若」白条的真正触发源）**：`WebviewWindow::show()` →
+  tao `WindowState::set_window_flags(VISIBLE)` → `apply_diff` 会**先整字覆写**
+  `SetWindowLongW(GWL_STYLE/GWL_EXSTYLE, to_window_styles())` **再** `ShowWindow(SW_SHOW)`；
+  而 tao 的 `to_window_styles` 只在窗口**不可聚焦**时才带 `WS_EX_NOACTIVATE`
+  （`if !flags.contains(FOCUSABLE)`），tauri 的 `focusable` 默认 `true` —— 于是每次 show 都把
+  `prevent_activation` 设的 `WS_EX_NOACTIVATE` **抹掉**，紧随其后的 `ShowWindow(SW_SHOW)`
+  便**真的激活了胶囊**。激活正是 #14764 文档化的幽灵触发面（"drag or focus change"），条上
+  文字取自页面 `<title>`；这也回答了「为什么偏偏在点击那一瞬间」——点击是唯一 show 胶囊的时刻
+  （`start_session_internal` → `session_show`；overlay 因 0.5.7 已可见短路而不 show）。0.5.6
+  用 show 后的轻推把它清掉（同一轻推也是 0.5.7 修掉的**白背景**帧来源），0.5.7 把轻推挪到
+  show 前 → 它原本负责清除的那条白条重新可见。**0.5.8 修法**：overlay/session 两窗
+  `"focusable": false`（`tauri.conf.json` + 两个重建 builder 的 `.focusable(false)` +
+  `harden_overlay_window` 内幂等 `set_focusable(false)` 断言），使 **tao 自己的样式永远带
+  `WS_EX_NOACTIVATE`** → show 不可能激活胶囊 → 幽灵无触发面，且**不需要任何 show 后几何变更**
+  （0.5.7 白闪修复与 0.5.4「手势/会话期间几何不可变」都不动）；轻推与 `Focused` 硬化自此降级
+  为兜底（保留）。顺带堵住潜在缺陷：会话启动不再把前台从用户正在听写的应用抢走。
   **0.5.7 起 `show_overlay_window` 只在窗口「此前不可见」时才 show/硬化/轻推**（见
   `commands.rs` 条目）：常驻待机胶囊本就一直可见，会话启动再跑一遍等于对可见透明窗做一次
   无谓尺寸变化，正是白闪来源。另

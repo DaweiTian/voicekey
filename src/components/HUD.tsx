@@ -27,6 +27,7 @@ import {
   setWinStart,
   SILENCE_LEVEL_THRESHOLD,
   type DragCommand,
+  type DragPhase,
   type OverlayDragState,
   type PhysicalPoint,
 } from '../lib/overlayDrag'
@@ -35,6 +36,8 @@ export function HUD() {
   const { t } = useTranslation()
   const [overlayState, setOverlayState] = useState<OverlayState>({ status: 'idle' })
   const [isVisible, setIsVisible] = useState(false)
+  /** 手势阶段：用于给待机胶囊提供显式按压反馈（pending / holding 时收缩）。 */
+  const [gesturePhase, setGesturePhase] = useState<DragPhase>('idle')
   /**
    * 贴边吸附（docked）的**边**：`null` = 未吸附（待机胶囊全形：图标 + `holdToTalk`），
    * `'left' | 'right' | 'top' | 'bottom'` = 已吸附（紧凑形态：仅图标，且按边贴齐屏幕
@@ -110,6 +113,9 @@ export function HUD() {
     const wasLatched = dragRef.current.latched
     dragRef.current = nextState
     latchedRef.current = nextState.latched
+    // pending/holding 阶段让待机胶囊显式收缩，提供跟手的按压反馈；
+    // dragging 时立即释放按压态，避免拖拽过程中仍显示按下。
+    setGesturePhase(nextState.phase)
     if (nextState.latched && !wasLatched) {
       lastVoiceAtRef.current = Date.now()
     }
@@ -556,13 +562,15 @@ export function HUD() {
             // padding / gap / 文字 max-width 连续驱动（≈104px ↔ 32px 平滑收放），
             // 高度是显式类值（h-9 → h-8）可直接插值；v4 的位移走独立 `translate`
             // 属性（不是 `transform`），必须显式列入 transition 才平滑贴齐 / 归零。
-            'transition-[opacity,transform,translate,filter,padding,gap,max-width,height] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)] active:scale-95',
+            'transition-[opacity,transform,translate,filter,padding,gap,max-width,height] duration-300 ease-[cubic-bezier(0.23,1,0.32,1)]',
             // 紧凑 32×32（= 上/下吸附的可见半窗高 64/2，故上下贴边整只屏内）；
             // 全形 h-9 ≈104×36，形态与原实现一致。
             docked ? 'h-8 max-w-[32px] px-1.5 gap-0' : 'h-9 max-w-[240px] px-3.5 gap-2',
             isVisible
               ? 'translate-y-0 scale-100 opacity-100 blur-0'
               : 'translate-y-2 scale-95 opacity-0 blur-sm',
+            // pending / holding 阶段显式收缩，提供跟手的按压反馈；dragging 已释放。
+            (gesturePhase === 'pending' || gesturePhase === 'holding') && 'scale-95',
             // 贴边贴齐（±16px = 紧凑边长/2，把胶囊外缘正好压到窗口中线 = 屏幕边，
             // 整只胶囊含图标 chip 完全落在屏内）。必须排在入场 translate **之后**：
             // twMerge 保留最后写法，贴边位移优先于入场位移（二者同轴时）。
