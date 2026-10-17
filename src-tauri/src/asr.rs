@@ -27,7 +27,14 @@ fn classic_files() -> Vec<AsrFileMeta> {
     vec![
         AsrFileMeta {
             name: "model.int8.onnx".into(),
-            size_bytes: 231_000_000,
+            // MUST equal the real byte count. `status()` (readiness) and
+            // `download_one()` (post-download validation) both compare with
+            // **strict equality**, so an estimate here reports "not downloaded"
+            // forever and makes every download attempt fail. Value verified
+            // against the downloaded artifact on 2026-10-17 (SHA-256 c71f0ce0…,
+            // 239_233_841 bytes) - update together with `sha256` when the model
+            // revision changes.
+            size_bytes: 239_233_841,
             sha256: "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51".into(),
             urls: vec![
                 "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx".into(),
@@ -36,7 +43,9 @@ fn classic_files() -> Vec<AsrFileMeta> {
         },
         AsrFileMeta {
             name: "tokens.txt".into(),
-            size_bytes: 1_000_000,
+            // Real byte count (same strict-equality rule as above); verified
+            // 2026-10-17, SHA-256 f449eb28….
+            size_bytes: 315_894,
             sha256: "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc".into(),
             urls: vec![
                 "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt".into(),
@@ -50,6 +59,16 @@ fn streaming_files() -> Vec<AsrFileMeta> {
     vec![
         AsrFileMeta {
             name: "encoder-480ms.onnx".into(),
+            // KNOWN BROKEN, deliberately NOT "fixed" here (2026-10-17): the
+            // current upstream master of this URL serves 487_029_601 bytes with
+            // SHA-256 cb58274b…cf52f (downloaded twice, modelscope + hf-mirror,
+            // identical), which does not match the `sha256` pinned below - so
+            // this asset points at a different revision than the one shipped.
+            // Guessing a size (or swapping in the new hash) would silently swap
+            // the model revision, so the size stays untouched until the intended
+            // revision is decided. Consequence: streaming ASR cannot download
+            // today (the SHA-256 check in `download_one` rejects it) - the
+            // classic (SenseVoice) engine is unaffected.
             size_bytes: 120_000_000,
             sha256: "0c3454033d249081df124ddcd7adaf3deca07d0b999b26f2ee5d2475d37abc74".into(),
             urls: vec![
@@ -59,7 +78,9 @@ fn streaming_files() -> Vec<AsrFileMeta> {
         },
         AsrFileMeta {
             name: "decoder-480ms.onnx".into(),
-            size_bytes: 40_000_000,
+            // Real byte count, verified by download + SHA-256 match on
+            // 2026-10-17 (was an estimate of 40_000_000).
+            size_bytes: 11_309_084,
             sha256: "3658368d274a5d5fd39a7ac20c46bed0ad9cfea1f0feddef30d5d89797c1f499".into(),
             urls: vec![
                 "https://www.modelscope.ai/models/Gilgamesh-J/X-ASR-zh-en/resolve/master/deployment/models/chunk-480ms-model/decoder-480ms.onnx".into(),
@@ -68,7 +89,9 @@ fn streaming_files() -> Vec<AsrFileMeta> {
         },
         AsrFileMeta {
             name: "joiner-480ms.onnx".into(),
-            size_bytes: 60_000_000,
+            // Real byte count, verified by download + SHA-256 match on
+            // 2026-10-17 (was an estimate of 60_000_000).
+            size_bytes: 10_260_467,
             sha256: "03781c98165a2385024c9cecdd2b6b13310d81db23a62c7da420782c2915cf81".into(),
             urls: vec![
                 "https://www.modelscope.ai/models/Gilgamesh-J/X-ASR-zh-en/resolve/master/deployment/models/chunk-480ms-model/joiner-480ms.onnx".into(),
@@ -77,7 +100,9 @@ fn streaming_files() -> Vec<AsrFileMeta> {
         },
         AsrFileMeta {
             name: "tokens.txt".into(),
-            size_bytes: 1_000_000,
+            // Real byte count, verified by download + SHA-256 match on
+            // 2026-10-17 (was an estimate of 1_000_000).
+            size_bytes: 58_806,
             sha256: "b818a60878b9aae978cbb8ad594acbd403d76d1af2e31ef4197c84e2dbdba27c".into(),
             urls: vec![
                 "https://www.modelscope.ai/models/Gilgamesh-J/X-ASR-zh-en/resolve/master/deployment/models/chunk-480ms-model/tokens.txt".into(),
