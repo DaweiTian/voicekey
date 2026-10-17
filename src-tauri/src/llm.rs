@@ -1,8 +1,13 @@
+//! LLM 精炼 / 翻译调用与连接解析。
+//!
+//! 权威的精炼 system prompt 已迁至 `refine_prompt.rs`（最小修改护栏 + 口水词
+//! 规则 + 用户词表，全部折叠进单次调用）；本模块只负责把它接进一次
+//! chat completion。旧常量 `REFINE_SYSTEM_PROMPT` 已删除，勿在此重建。
+
 use crate::config::{LLMRefineConfig, ProviderKeyConfig, STORED_SECRET_PLACEHOLDER};
+use crate::filler::FillerCleanupMode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
-const REFINE_SYSTEM_PROMPT: &str = "You are a careful speech-to-text editor. Fix punctuation, casing, and obvious ASR errors. Preserve the speaker's meaning and language. Return only the revised text.";
 
 const TRANSLATE_SYSTEM_PROMPT: &str = "You are a precise translator. Translate the user's text into the target language. Preserve meaning, tone, and formatting. Return only the translation.";
 
@@ -229,8 +234,18 @@ fn strip_think(content: &str) -> String {
     trimmed.to_string()
 }
 
+/// 一次精炼调用的 system prompt：基础护栏 + 本次的用户词表 + 口水词规则。
+/// 永远只有一次 LLM 调用——口水词清理折叠进本 prompt，不做第二次请求。
+pub fn system_prompt_for(config: &LLMRefineConfig) -> String {
+    crate::refine_prompt::build_refine_system_prompt(
+        &config.user_glossary,
+        FillerCleanupMode::parse(&config.filler_cleanup) == FillerCleanupMode::Llm,
+    )
+}
+
 pub async fn refine_text(text: &str, config: &LLMRefineConfig) -> Result<String, String> {
-    chat_completion(REFINE_SYSTEM_PROMPT, text, config).await
+    let system = system_prompt_for(config);
+    chat_completion(&system, text, config).await
 }
 
 pub async fn translate_text(
@@ -263,4 +278,32 @@ pub async fn test_connection(config: &LLMRefineConfig) -> RefineConnectionResult
 
 pub fn normalize_provider_config(_raw: &ProviderKeyConfig) -> ProviderKeyConfig {
     _raw.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prompt_injects_glossary_and_filler_flag() {
+        let mut config = LLMRefineConfig::default();
+        config.user_glossary = vec!["张伟".to_string()];
+        config.filler_cleanup = "llm".into();
+
+        let prompt = system_prompt_for(&config);
+        assert!(prompt.contains("- 张伟"));
+        assert!(prompt.contains("Filler-word cleanup"));
+
+        config.filler_cleanup = "rules".into();
+        let prompt = system_prompt_for(&config);
+        assert!(prompt.contains("- 张伟"));
+        assert!(!prompt.contains("Filler-word cleanup"));
+    }
+
+    #[test]
+    fn system_prompt_defaults_are_safe() {
+        let prompt = system_prompt_for(&LLMRefineConfig::default());
+        assert!(prompt.contains("Minimal edit rules"));
+        assert!(!prompt.contains("Preferred glossary terms:"));
+    }
 }

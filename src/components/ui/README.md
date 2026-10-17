@@ -18,6 +18,7 @@ shadcn/ui 组件库，基于 Radix UI 原语构建的可复用 UI 组件集合�
 - `label.tsx` - 表单标签
 - `select.tsx` - 下拉选择器
 - `switch.tsx` - 开关切换
+- `textarea.tsx` - 多行文本输入框
 
 ### 反馈组件
 

@@ -41,13 +41,16 @@ import { formatHostMemoryGiB } from '@/shared/host-capabilities'
 import { normalizeRefineBaseUrl } from '@/shared/refine-url'
 import {
   defaultLLMRefineConfig,
+  normalizeFillerCleanup,
   normalizeLLMRefineConfig,
+  normalizeUserGlossary,
   resolveLLMConnection,
 } from '@/shared/llm-config'
 import type {
   AppConfig,
   ASRMode,
   ConfigSecretRequest,
+  FillerCleanupMode,
   LLMRefineConfig,
   LLMProvider,
   HostCapabilities,
@@ -71,6 +74,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
 import { useTheme } from '@/lib/useTheme'
 import { validateHotkey } from '@/lib/hotkey-utils'
@@ -1404,6 +1408,36 @@ export default function SettingsPage() {
     }))
   }
 
+  const [userGlossaryDraft, setUserGlossaryDraft] = useState('')
+
+  useEffect(() => {
+    if (isConfigLoading) return
+    setUserGlossaryDraft(normalizedLLMRefineConfig.userGlossary.join('\n'))
+    // 只在配置加载完成后同步一次草稿，避免打字被归一化回写打断。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConfigLoading])
+
+  const handleFillerCleanupChange = (value: FillerCleanupMode) => {
+    setConfig((prev) => ({
+      ...prev,
+      llmRefine: normalizeLLMRefineConfig({
+        ...prev.llmRefine,
+        fillerCleanup: normalizeFillerCleanup(value),
+      }),
+    }))
+  }
+
+  const handleUserGlossaryChange = (raw: string) => {
+    setUserGlossaryDraft(raw)
+    setConfig((prev) => ({
+      ...prev,
+      llmRefine: normalizeLLMRefineConfig({
+        ...prev.llmRefine,
+        userGlossary: normalizeUserGlossary(raw.split('\n')),
+      }),
+    }))
+  }
+
   const handleMicrophoneChange = (value: string) => {
     if (value === NO_MICROPHONE_SELECT_VALUE) return
 
@@ -2657,6 +2691,41 @@ export default function SettingsPage() {
                 disabled={testingRefine}
                 onChange={(checked) => void handleRefineEnabledChange(checked)}
               />
+
+              <div className="mt-4 space-y-2">
+                <Label htmlFor="fillerCleanup">{t('settings.fillerCleanup')}</Label>
+                <Select
+                  value={normalizedLLMRefineConfig.fillerCleanup}
+                  onValueChange={(value) => handleFillerCleanupChange(value as FillerCleanupMode)}
+                >
+                  <SelectTrigger id="fillerCleanup" className="no-drag w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="off">{t('settings.fillerCleanupOff')}</SelectItem>
+                    <SelectItem value="rules">{t('settings.fillerCleanupRules')}</SelectItem>
+                    <SelectItem value="llm">{t('settings.fillerCleanupLlm')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t('settings.fillerCleanupHelp')}</p>
+                {normalizedLLMRefineConfig.fillerCleanup === 'llm' && !llmRefineEnabled && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('settings.fillerCleanupLlmHint')}
+                  </p>
+                )}
+              </div>
+
+              <div className="mt-4 space-y-2">
+                <Label htmlFor="userGlossary">{t('settings.userGlossary')}</Label>
+                <Textarea
+                  id="userGlossary"
+                  className="no-drag min-h-24 font-mono text-xs"
+                  placeholder={t('settings.userGlossaryPlaceholder')}
+                  value={userGlossaryDraft}
+                  onChange={(event) => handleUserGlossaryChange(event.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">{t('settings.userGlossaryHelp')}</p>
+              </div>
             </div>
 
             {/* 翻译 */}

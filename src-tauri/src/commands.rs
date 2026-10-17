@@ -4,6 +4,7 @@ use crate::audio::{
     StreamingAudioFramePayload, SESSION_MAX_DURATION_SECONDS,
 };
 use crate::config::{AppConfig, ConfigSecretRequest};
+use crate::filler;
 use crate::history::HistoryManager;
 use crate::hotkey;
 use crate::inject;
@@ -1149,7 +1150,15 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
         asr::transcribe_cloud(&api_key, &base, &model, &audio, "auto").await?
     };
 
-    let mut final_text = raw_text;
+    // 规则档口水词清理作用在 ASR 直出文本上，先于 refine/translate，
+    // 因此在润色关闭时也生效（兜底）。`llm` 档 + 润色开启时此处原样
+    // 透传，由精炼 prompt 处理（仍是单次调用）。流式 partial/HUD 路径
+    // 不经过这里，不受影响。
+    let mut final_text = filler::cleanup_stage(
+        &raw_text,
+        &config.llm_refine.filler_cleanup,
+        config.llm_refine.enabled,
+    );
 
     // Optional refine / translate via LLM
     if !final_text.trim().is_empty() && config.llm_refine.enabled {
