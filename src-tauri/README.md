@@ -342,6 +342,14 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   load → mutate → save 全程持进程级 `CONFIG_LOCK`（与 `stats.rs` 的 `STATS_LOCK`
   同款），读也持锁防半截文件；overlay 重建工作线程、托盘/主线程、IPC 线程并发
   写不丢更新。锁内只做文件 I/O 与纯 JSON 合并、不嵌套其他锁（无锁序死锁风险）。
+  **存储根（0.5.14）**：`config_dir()` 一处收口——`<exe_dir>\data\` 下存在
+  `.portable` 标记文件时数据根 = 安装目录（便携模式），否则 = `%APPDATA%\voice-key`；
+  config / history / stats / logs 全派生自它。根**一次进程内解析固定**
+  （`OnceLock` / `resolved_root`），切换只在下次启动生效（否则 `ConfigStore` 启动时
+  缓存的路径会与 `history_file()` / `log_dir()` 失同步）。`switch_storage_root` 是
+  写探测 → 复制 → 校验 → 标记门 → 失败回滚的完整迁移；`.portable` 是模式切换的
+  **原子门**（裸 `data\` 不算便携）。渲染层「存储位置」小节走 `get_storage_status` /
+  `switch_storage_root` 两个命令。
 - `src/asr.rs` - 通用云端识别：按 `CloudDialect` 分叉请求载荷——`chat_asr_data_url`
   （MiMo / 千问：`input_audio.data` 传 data URL + 顶层 `asr_options`，与 0.5.11 载荷逐字节
   一致）、`chat_openai_audio`（OpenAI / 豆包 Ark：纯 base64 + `format:"wav"` + 转写指令
@@ -366,3 +374,7 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
 cd src-tauri && cargo check
 cd src-tauri && cargo test
 ```
+
+**升级幸存验收（每次升级人工确认）**：便携模式（exe 旁 `data\` + `.portable`）下，
+NSIS 升级只替换安装包自身 payload；升级后 exe 旁的 `data\` 与 `.portable` 必须幸存
+（数据仍在安装目录、设置页仍显示「便携」）。

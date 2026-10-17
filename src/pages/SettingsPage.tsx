@@ -14,6 +14,7 @@ import {
   Plug,
   RefreshCw,
   Cloud,
+  HardDrive,
   Languages,
   Monitor,
   KeyRound,
@@ -41,6 +42,7 @@ import {
   applyCloudAsrPreset,
   getCloudAsrPreset,
 } from '@/shared/cloud-asr'
+import { storageKindLabelKey, storageSwitchLabelKey } from '@/shared/storage'
 import {
   defaultLLMRefineConfig,
   normalizeFillerCleanup,
@@ -56,6 +58,7 @@ import type {
   LLMRefineConfig,
   LLMProvider,
   LinuxIntegrationStatus,
+  StorageStatus,
   TranslationConfig,
   UpdateInfo,
 } from '@/shared/types'
@@ -1618,6 +1621,37 @@ export default function SettingsPage() {
   )
   const linuxBackendReady = linuxIntegrationReady || linuxIntegrationStatus?.session === 'x11'
 
+  // 存储位置（便携模式切换）：挂载时读一次当前根；切换成功后提示重启生效——根路径在
+  // Rust 侧一次进程内解析固定（`config::resolved_root`），切换只在下次启动生效。
+  const [storageStatus, setStorageStatus] = useState<StorageStatus | null>(null)
+  const [storageBusy, setStorageBusy] = useState(false)
+  const [storageMessage, setStorageMessage] = useState<{
+    type: 'success' | 'error'
+    text: string
+  } | null>(null)
+
+  useEffect(() => {
+    window.electronAPI
+      .getStorageStatus()
+      .then(setStorageStatus)
+      .catch((error) => console.error('Failed to load storage status:', error))
+  }, [])
+
+  const handleSwitchStorage = async () => {
+    if (!storageStatus || storageBusy) return
+    setStorageBusy(true)
+    setStorageMessage(null)
+    try {
+      await window.electronAPI.switchStorageRoot(storageStatus.target)
+      setStorageMessage({ type: 'success', text: t('settings.storage.restartNotice') })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setStorageMessage({ type: 'error', text: t('settings.storage.failed', { message }) })
+    } finally {
+      setStorageBusy(false)
+    }
+  }
+
   return (
     <div className="mx-auto max-w-[1040px] px-8 py-7">
       {/* 页头 */}
@@ -2530,6 +2564,57 @@ export default function SettingsPage() {
                 <ScrollText className="h-4 w-4" />
                 {t('settings.viewLogs')}
               </Button>
+            </div>
+          </SectionCard>
+
+          {/* 存储位置 */}
+          <SectionCard
+            icon={<HardDrive className="h-[18px] w-[18px]" />}
+            title={t('settings.storage.title')}
+            desc={t('settings.storage.desc')}
+          >
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="text-xs text-muted-foreground">{t('settings.storage.current')}</p>
+                  <p className="mt-0.5 break-all font-mono text-xs text-foreground">
+                    {storageStatus?.root ?? '…'}
+                  </p>
+                  {storageStatus ? (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {t(storageKindLabelKey(storageStatus.kind))}
+                    </p>
+                  ) : null}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void handleSwitchStorage()}
+                  disabled={!storageStatus || storageBusy}
+                  className="no-drag shrink-0 cursor-pointer"
+                >
+                  {storageBusy ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <HardDrive className="h-4 w-4" />
+                  )}
+                  {storageBusy
+                    ? t('settings.storage.pending')
+                    : t(storageSwitchLabelKey(storageStatus?.target ?? 'portable'))}
+                </Button>
+              </div>
+              {storageMessage ? (
+                <p
+                  className={cn(
+                    'text-xs leading-relaxed',
+                    storageMessage.type === 'error'
+                      ? 'text-destructive'
+                      : 'text-green-600 dark:text-green-500',
+                  )}
+                >
+                  {storageMessage.text}
+                </p>
+              ) : null}
             </div>
           </SectionCard>
 

@@ -1,6 +1,6 @@
 [package]
 name = "voice-key"
-version = "0.5.13"
+version = "0.5.14"
 description = "Privacy-first push-to-talk voice input for Windows, macOS, and Linux"
 authors = ["BuildWithAIs"]
 edition = "2021"

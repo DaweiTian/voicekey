@@ -24,8 +24,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
-use std::sync::{Mutex, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// Process-wide guard for read-modify-write cycles on the config file (see the
 /// module header for the enumerated write entry points). A poisoned mutex is
@@ -300,11 +300,94 @@ pub struct ConfigSecretRequest {
     pub provider: String,
 }
 
-pub fn config_dir() -> PathBuf {
+// ---------------------------------------------------------------------------
+// Storage root: `%APPDATA%\voice-key` (default) or a portable `<exe_dir>\data\`.
+// ---------------------------------------------------------------------------
+
+/// Portable marker file name. Its presence inside `<exe_dir>\data\` (and *only*
+/// its presence) flips the data root to the install directory: a bare `data\`
+/// directory left behind by a half-finished migration must never be read as
+/// portable. The marker is therefore the single source of truth and is written
+/// last / removed last — the atomic mode gate.
+pub const PORTABLE_MARKER_NAME: &str = ".portable";
+
+/// Which root the current process resolved to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StorageRoot {
+    /// `%APPDATA%\voice-key` (or the platform data dir).
+    AppData,
+    /// `<exe_dir>\data` (portable mode).
+    Portable,
+}
+
+impl StorageRoot {
+    /// The other root — what the settings switch button offers.
+    pub fn toggled(self) -> Self {
+        match self {
+            StorageRoot::AppData => StorageRoot::Portable,
+            StorageRoot::Portable => StorageRoot::AppData,
+        }
+    }
+}
+
+/// Directory containing the running executable.
+pub fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+/// `<exe_dir>\data`, or `None` when the executable directory is unknown.
+pub fn portable_root() -> Option<PathBuf> {
+    exe_dir().map(|dir| dir.join("data"))
+}
+
+/// The default (non-portable) data root: `%APPDATA%\voice-key`.
+pub fn appdata_root() -> PathBuf {
     let base = dirs::config_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("."));
-    let dir = base.join("voice-key");
+    base.join("voice-key")
+}
+
+/// Pure portable decision for a given executable directory: portable **iff**
+/// the marker file exists. A bare `data\` directory is not enough.
+fn storage_root_for(exe_dir: &Path) -> StorageRoot {
+    if exe_dir.join("data").join(PORTABLE_MARKER_NAME).is_file() {
+        StorageRoot::Portable
+    } else {
+        StorageRoot::AppData
+    }
+}
+
+/// Process-wide resolved root. Resolved **once**: the root must not change
+/// mid-process — deleting the marker while switching back must not move
+/// `history_file()` / `log_dir()` out from under a `ConfigStore` whose path was
+/// cached at startup. A switch therefore only takes effect after a restart.
+static RESOLVED_ROOT: OnceLock<(StorageRoot, PathBuf)> = OnceLock::new();
+
+fn resolved_root() -> &'static (StorageRoot, PathBuf) {
+    RESOLVED_ROOT.get_or_init(|| match exe_dir() {
+        Some(dir) => {
+            let root = dir.join("data");
+            match storage_root_for(&dir) {
+                StorageRoot::Portable => (StorageRoot::Portable, root),
+                StorageRoot::AppData => (StorageRoot::AppData, appdata_root()),
+            }
+        }
+        None => (StorageRoot::AppData, appdata_root()),
+    })
+}
+
+/// Which root this process is using (stable for the process lifetime).
+pub fn storage_root_kind() -> StorageRoot {
+    resolved_root().0
+}
+
+/// The active data root. Config / history / stats / logs all derive from it.
+pub fn config_dir() -> PathBuf {
+    let dir = resolved_root().1.clone();
     let _ = fs::create_dir_all(&dir);
     dir
 }
@@ -327,6 +410,178 @@ pub fn log_dir() -> PathBuf {
     let dir = config_dir().join("logs");
     let _ = fs::create_dir_all(&dir);
     dir
+}
+
+// ---------------------------------------------------------------------------
+// One-click migration between the two roots.
+// ---------------------------------------------------------------------------
+
+/// Data files that must copy byte-for-byte (strict size check after copy).
+const STRICT_DATA_FILES: [&str; 3] = [
+    "voice-key-config.json",
+    "voice-key-history.json",
+    "voice-key-stats.json",
+];
+
+/// Live log directory, copied with grow-tolerance (the running app may append
+/// to the source while it is being copied).
+const LOG_DIR_NAME: &str = "logs";
+
+/// Switch the data root to `target`: copy + verify every data file, then flip
+/// the marker (the atomic mode gate). Any failure rolls back this round's
+/// copies and leaves the current mode untouched — both roots stay intact.
+/// Takes effect on the next launch (see [`resolved_root`]).
+pub fn switch_storage_root(target: StorageRoot) -> Result<(), String> {
+    if target == storage_root_kind() {
+        return Ok(());
+    }
+    let appdata = appdata_root();
+    let portable =
+        portable_root().ok_or_else(|| "无法解析程序所在目录，无法迁移到安装目录。".to_string())?;
+    switch_storage_root_between(target, &appdata, &portable)
+}
+
+/// Explicit-roots core of [`switch_storage_root`], injectable so tests never
+/// touch the real `%APPDATA%` or the real executable directory.
+fn switch_storage_root_between(
+    target: StorageRoot,
+    appdata: &Path,
+    portable: &Path,
+) -> Result<(), String> {
+    match target {
+        StorageRoot::Portable => to_portable(appdata, portable),
+        StorageRoot::AppData => to_appdata(appdata, portable),
+    }
+}
+
+/// `%APPDATA%` → `<exe_dir>\data`: probe, copy, verify, then write the marker.
+fn to_portable(appdata: &Path, portable: &Path) -> Result<(), String> {
+    probe_writable(portable)
+        .map_err(|e| format!("当前安装目录不可写（如 Program Files），请保持默认位置：{e}"))?;
+    let mut created = Vec::new();
+    if let Err(e) = copy_data_files(appdata, portable, &mut created) {
+        rollback(&created);
+        return Err(e);
+    }
+    // The marker is the mode gate: written LAST, only after every file verified.
+    if let Err(e) = fs::write(portable.join(PORTABLE_MARKER_NAME), b"") {
+        rollback(&created);
+        return Err(format!("写入便携标记失败：{e}"));
+    }
+    Ok(())
+}
+
+/// `<exe_dir>\data` → `%APPDATA%`: probe, copy, verify, then remove the marker
+/// and clear the portable directory's migration products.
+fn to_appdata(appdata: &Path, portable: &Path) -> Result<(), String> {
+    probe_writable(appdata).map_err(|e| format!("默认数据目录不可写：{e}"))?;
+    let mut created = Vec::new();
+    if let Err(e) = copy_data_files(portable, appdata, &mut created) {
+        rollback(&created);
+        return Err(e);
+    }
+    // Marker removed LAST: only then does the next launch resolve to AppData.
+    if let Err(e) = fs::remove_file(portable.join(PORTABLE_MARKER_NAME)) {
+        rollback(&created);
+        return Err(format!("移除便携标记失败：{e}"));
+    }
+    cleanup_portable_root(portable);
+    Ok(())
+}
+
+/// Probe that `dir` is creatable and writable (write + delete a temp file).
+fn probe_writable(dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let probe = dir.join(".voice-key-write-probe");
+    fs::write(&probe, b"probe").map_err(|e| e.to_string())?;
+    let _ = fs::remove_file(&probe);
+    Ok(())
+}
+
+/// Copy the data files (strict) and the log files (grow-tolerant) from
+/// `src_root` to `dst_root`, recording every destination written into `created`
+/// so the caller can roll back a partial migration.
+fn copy_data_files(
+    src_root: &Path,
+    dst_root: &Path,
+    created: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    for name in STRICT_DATA_FILES {
+        let src = src_root.join(name);
+        if !src.is_file() {
+            continue;
+        }
+        let dst = dst_root.join(name);
+        copy_and_verify(&src, &dst, true)?;
+        created.push(dst);
+    }
+    let src_logs = src_root.join(LOG_DIR_NAME);
+    if src_logs.is_dir() {
+        for entry in fs::read_dir(&src_logs).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let dst = dst_root.join(LOG_DIR_NAME).join(entry.file_name());
+            copy_and_verify(&entry.path(), &dst, false)?;
+            created.push(dst);
+        }
+    }
+    Ok(())
+}
+
+/// Read `src` fully, write it to `dst`, then verify the written size.
+fn copy_and_verify(src: &Path, dst: &Path, strict: bool) -> Result<(), String> {
+    let data = fs::read(src).map_err(|e| format!("读取 {} 失败：{e}", src.display()))?;
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(dst, &data).map_err(|e| format!("写入 {} 失败：{e}", dst.display()))?;
+    verify_copy(data.len() as u64, dst, strict)
+}
+
+/// Verify a copy against the source size captured at copy time: `strict` →
+/// exact equality (config / history / stats), tolerant → destination at least
+/// as large (the live log may grow mid-copy).
+fn verify_copy(source_len: u64, dst: &Path, strict: bool) -> Result<(), String> {
+    let written = fs::metadata(dst)
+        .map_err(|e| format!("校验 {} 失败：{e}", dst.display()))?
+        .len();
+    let ok = if strict {
+        written == source_len
+    } else {
+        written >= source_len
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "校验失败：{} 复制后大小 {} 与源 {} 不符",
+            dst.display(),
+            written,
+            source_len
+        ))
+    }
+}
+
+/// Remove this round's copied files (reverse order). The marker was never
+/// written, so the current mode is unchanged and both roots stay intact.
+fn rollback(created: &[PathBuf]) {
+    for path in created.iter().rev() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Best-effort cleanup of the portable directory after switching back. Strictly
+/// limited to our own migration products inside `<exe_dir>\data` — unknown user
+/// files are never touched (`remove_dir` only succeeds when it is empty).
+fn cleanup_portable_root(portable: &Path) {
+    for name in STRICT_DATA_FILES {
+        let _ = fs::remove_file(portable.join(name));
+    }
+    let _ = fs::remove_dir_all(portable.join(LOG_DIR_NAME));
+    let _ = fs::remove_file(portable.join(PORTABLE_MARKER_NAME));
+    let _ = fs::remove_dir(portable);
 }
 
 /// invoke 边界校验用户词表：形状非法/超限报错（渲染层数据不可信），
@@ -708,5 +963,174 @@ mod tests {
         assert_eq!(normalize_filler_cleanup("rules").as_deref(), Some("rules"));
         assert_eq!(normalize_filler_cleanup("llm").as_deref(), Some("llm"));
         assert_eq!(normalize_filler_cleanup("drop-everything"), None);
+    }
+
+    // ---- storage root / one-click migration --------------------------------
+    //
+    // Every test works inside its own `std::env::temp_dir()` sandbox: the real
+    // `%APPDATA%\voice-key` and the real executable directory are NEVER touched.
+
+    /// Unique, isolated temp directory for one test.
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("voice-key-test-{tag}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Seed a root with the three data files and one live log file.
+    fn seed_root(root: &Path) {
+        fs::write(root.join("voice-key-config.json"), b"{\"app\":{}}").unwrap();
+        fs::write(root.join("voice-key-history.json"), b"[1,2,3]").unwrap();
+        fs::write(root.join("voice-key-stats.json"), b"{\"totals\":{}}").unwrap();
+        fs::create_dir_all(root.join(LOG_DIR_NAME)).unwrap();
+        fs::write(root.join(LOG_DIR_NAME).join("voice-key.log"), b"log line\n").unwrap();
+    }
+
+    #[test]
+    fn portable_decision_requires_the_marker_file() {
+        let exe = temp_root("exe-none");
+        assert_eq!(storage_root_for(&exe), StorageRoot::AppData);
+
+        // A bare `data\` directory (a half-finished migration) is NOT portable.
+        fs::create_dir_all(exe.join("data")).unwrap();
+        assert_eq!(storage_root_for(&exe), StorageRoot::AppData);
+
+        // Only the marker flips the root.
+        fs::write(exe.join("data").join(PORTABLE_MARKER_NAME), b"").unwrap();
+        assert_eq!(storage_root_for(&exe), StorageRoot::Portable);
+
+        let _ = fs::remove_dir_all(&exe);
+    }
+
+    #[test]
+    fn migrate_to_portable_copies_files_and_writes_the_marker() {
+        let appdata = temp_root("appdata-to-portable");
+        let portable = temp_root("portable-target");
+        seed_root(&appdata);
+
+        switch_storage_root_between(StorageRoot::Portable, &appdata, &portable).unwrap();
+
+        assert!(portable.join(PORTABLE_MARKER_NAME).is_file());
+        for name in STRICT_DATA_FILES {
+            assert_eq!(
+                fs::read(portable.join(name)).unwrap(),
+                fs::read(appdata.join(name)).unwrap(),
+                "{name} must copy byte-for-byte"
+            );
+        }
+        assert_eq!(
+            fs::read(portable.join(LOG_DIR_NAME).join("voice-key.log")).unwrap(),
+            b"log line\n"
+        );
+        // The source root is left untouched.
+        assert!(appdata.join("voice-key-config.json").is_file());
+
+        let _ = fs::remove_dir_all(&appdata);
+        let _ = fs::remove_dir_all(&portable);
+    }
+
+    #[test]
+    fn migrate_back_to_appdata_removes_the_marker_and_cleans_the_portable_dir() {
+        let appdata = temp_root("appdata-target");
+        let portable = temp_root("portable-source");
+        seed_root(&portable);
+        fs::write(portable.join(PORTABLE_MARKER_NAME), b"").unwrap();
+        // An unknown user file the cleanup must never delete.
+        fs::write(portable.join("user-note.txt"), b"keep me").unwrap();
+
+        switch_storage_root_between(StorageRoot::AppData, &appdata, &portable).unwrap();
+
+        assert!(!portable.join(PORTABLE_MARKER_NAME).exists());
+        for name in STRICT_DATA_FILES {
+            assert!(appdata.join(name).is_file(), "{name} must land in AppData");
+            assert!(!portable.join(name).exists(), "{name} must be cleaned up");
+        }
+        // The unknown user file (and therefore the non-empty directory) survives.
+        assert!(portable.join("user-note.txt").is_file());
+        assert!(portable.is_dir());
+
+        let _ = fs::remove_dir_all(&appdata);
+        let _ = fs::remove_dir_all(&portable);
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_and_leaves_both_roots_intact() {
+        let appdata = temp_root("appdata-rollback");
+        let portable = temp_root("portable-rollback");
+        seed_root(&appdata);
+        // Make the *second* strict file's destination a directory, so the copy
+        // fails after the first file already landed in the target.
+        fs::create_dir_all(portable.join("voice-key-history.json")).unwrap();
+
+        let result = switch_storage_root_between(StorageRoot::Portable, &appdata, &portable);
+        assert!(
+            result.is_err(),
+            "a mid-copy failure must surface as an error"
+        );
+
+        // No marker (the mode gate was never written) …
+        assert!(!portable.join(PORTABLE_MARKER_NAME).exists());
+        // … and this round's already-copied file was rolled back.
+        assert!(!portable.join("voice-key-config.json").exists());
+        // The source root is fully intact.
+        assert!(appdata.join("voice-key-config.json").is_file());
+        assert!(appdata.join("voice-key-history.json").is_file());
+
+        let _ = fs::remove_dir_all(&appdata);
+        let _ = fs::remove_dir_all(&portable);
+    }
+
+    #[test]
+    fn migration_skips_absent_files() {
+        let appdata = temp_root("appdata-partial");
+        let portable = temp_root("portable-partial");
+        fs::write(appdata.join("voice-key-config.json"), b"{}").unwrap();
+
+        switch_storage_root_between(StorageRoot::Portable, &appdata, &portable).unwrap();
+
+        assert!(portable.join(PORTABLE_MARKER_NAME).is_file());
+        assert!(portable.join("voice-key-config.json").is_file());
+        assert!(!portable.join("voice-key-history.json").exists());
+
+        let _ = fs::remove_dir_all(&appdata);
+        let _ = fs::remove_dir_all(&portable);
+    }
+
+    #[test]
+    fn verify_copy_rejects_a_size_mismatch() {
+        let dir = temp_root("verify");
+        let dst = dir.join("dst.bin");
+        fs::write(&dst, b"12345").unwrap();
+
+        // Strict (config / history / stats): exact size required.
+        assert!(verify_copy(5, &dst, true).is_ok());
+        assert!(verify_copy(4, &dst, true).is_err());
+        assert!(verify_copy(6, &dst, true).is_err());
+
+        // Tolerant (live log): destination must be at least as large.
+        assert!(verify_copy(4, &dst, false).is_ok());
+        assert!(verify_copy(5, &dst, false).is_ok());
+        assert!(verify_copy(6, &dst, false).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_writable_rejects_a_path_under_a_regular_file() {
+        let dir = temp_root("probe");
+        let file = dir.join("a-file");
+        fs::write(&file, b"x").unwrap();
+        // `create_dir_all(<file>/child)` cannot succeed — mirrors the Program
+        // Files rejection the UI turns into a friendly message.
+        assert!(probe_writable(&file.join("child")).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn storage_root_toggles_between_the_two_kinds() {
+        assert_eq!(StorageRoot::AppData.toggled(), StorageRoot::Portable);
+        assert_eq!(StorageRoot::Portable.toggled(), StorageRoot::AppData);
     }
 }

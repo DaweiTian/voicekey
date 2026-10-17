@@ -303,6 +303,18 @@
     "troubleshooting": "故障排查",
     "logsDescription": "日志仅保存在本地，默认保留 {{days}} 天，单个文件最大 {{size}} MB。",
     "viewLogs": "查看日志",
+    "storage": {
+      "title": "存储位置",
+      "desc": "配置、历史、统计与日志的存放位置",
+      "current": "当前位置",
+      "kindAppData": "默认（用户 AppData 目录）",
+      "kindPortable": "便携（安装目录）",
+      "switchToPortable": "迁移到安装目录",
+      "switchToAppData": "迁移回默认位置",
+      "pending": "迁移中…",
+      "restartNotice": "迁移完成，重启应用生效。",
+      "failed": "迁移失败：{{message}}"
+    },
     "logDialogTitle": "应用日志",
     "logDialogDescription": "展示最近 {{size}} KB 的日志内容。",
     "logRefresh": "刷新",

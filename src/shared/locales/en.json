@@ -303,6 +303,18 @@
     "troubleshooting": "Troubleshooting",
     "logsDescription": "Logs are stored locally for {{days}} days. Each log file is limited to {{size}} MB.",
     "viewLogs": "View Logs",
+    "storage": {
+      "title": "Storage location",
+      "desc": "Where config, history, stats, and logs are stored",
+      "current": "Current location",
+      "kindAppData": "Default (user AppData folder)",
+      "kindPortable": "Portable (install folder)",
+      "switchToPortable": "Move to install folder",
+      "switchToAppData": "Move back to default",
+      "pending": "Migrating…",
+      "restartNotice": "Migration complete. Restart the app to apply.",
+      "failed": "Migration failed: {{message}}"
+    },
     "logDialogTitle": "Application Logs",
     "logDialogDescription": "Showing the last {{size}} KB of logs.",
     "logRefresh": "Refresh",

@@ -189,6 +189,8 @@ pub fn run() {
             commands::open_external,
             commands::get_log_tail,
             commands::open_log_folder,
+            commands::get_storage_status,
+            commands::switch_storage_root,
             commands::log,
             commands::get_linux_integration_status,
             commands::install_linux_integration,

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.14](https://github.com/BuildWithAIs/voicekey/compare/v0.5.13...v0.5.14) (2026-10-17)
+
+### Features
+
+- **config:** 存储位置可切换 + 一键迁移——`<exe_dir>\data\` 下存在 `.portable` 标记文件时数据根切到安装目录（便携模式），否则维持 `%APPDATA%\voice-key`；`config_dir()` 一处收口，config / history / stats / logs 全派生自它。设置页新增「存储位置」小节：显示当前绝对路径 + 切换按钮（按当前态显示「迁移到安装目录」/「迁移回默认位置」）+ 迁移中 loading + 成功后「迁移完成，重启应用生效」+ 错误显示。切换流程：写探测（安装目录不可写如 Program Files → 友好拒绝、留在原地）→ 逐文件复制 → 校验（config / history / stats 按 size 严格相等，logs 允许增长容忍）→ **写 / 删 `.portable` 标记（最后一笔 = 模式切换的原子门）** → 提示重启；任一步失败即回滚本轮复制、停留原模式，两份数据都完整。根路径一次进程内解析固定（`OnceLock`），切换只在下次启动生效
+- **config:** 便携判定以**标记文件**为准而非裸 `data\` 目录——迁移中途失败留下的半成品 `data\` 不会被误认成便携态；切回默认位置时严格只清理 `data\` 内我们自己的迁移产物（未知用户文件保留，`remove_dir` 仅在目录空时成功）
+- **ui:** 存储位置 i18n 双语全平（en / zh 393 / 393）
+
+### Notes
+
+- **升级幸存验收（待人工确认）**：NSIS 升级只替换安装包自身 payload，exe 旁 `data\` 与 `.portable` 应幸存——留待用户下次升级时人工核对
+
 ## [0.5.13](https://github.com/BuildWithAIs/voicekey/compare/v0.5.12...v0.5.13) (2026-10-17)
 
 ### Bug Fixes

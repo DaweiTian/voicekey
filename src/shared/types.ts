@@ -193,6 +193,20 @@ export interface UpdateInfo {
   error?: string
 }
 
+/** Which root the app stores its data under (mirrors the Rust `StorageRoot`). */
+export type StorageRootKind = 'appData' | 'portable'
+
+export interface StorageStatus {
+  /** Which root this process is using (stable until the next launch). */
+  kind: StorageRootKind
+  /** Absolute path of the active data root. */
+  root: string
+  /** The root the settings switch button would migrate to. */
+  target: StorageRootKind
+  /** Directory containing the executable, or `''` when it is unknown. */
+  exeDir: string
+}
+
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 export interface LogEntryPayload {

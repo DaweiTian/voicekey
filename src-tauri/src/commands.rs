@@ -3,7 +3,7 @@ use crate::audio::{
     now_ms, session_time_limit_reached, AudioChunkPayload, SessionStatus, StreamingAudioEndPayload,
     StreamingAudioFramePayload, SESSION_MAX_DURATION_SECONDS,
 };
-use crate::config::{AppConfig, ConfigSecretRequest};
+use crate::config::{AppConfig, ConfigSecretRequest, StorageRoot};
 use crate::filler;
 use crate::history::HistoryManager;
 use crate::hotkey;
@@ -1688,6 +1688,44 @@ pub fn get_log_tail() -> Result<String, String> {
 pub fn open_log_folder() -> Result<(), String> {
     let dir = crate::config::log_dir();
     open_path(&dir)
+}
+
+/// Snapshot of where the app stores its data, plus what the settings switch
+/// button offers. The root is resolved once per process (see
+/// `config::resolved_root`), so a switch only shows up after a restart.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageStatus {
+    /// Which root this process is using.
+    kind: StorageRoot,
+    /// Absolute path of the active data root.
+    root: String,
+    /// The root the switch button would migrate to (the other one).
+    target: StorageRoot,
+    /// Directory containing the executable, or `""` when it is unknown.
+    exe_dir: String,
+}
+
+#[tauri::command]
+pub fn get_storage_status() -> StorageStatus {
+    let kind = crate::config::storage_root_kind();
+    StorageStatus {
+        kind,
+        root: crate::config::config_dir().display().to_string(),
+        target: kind.toggled(),
+        exe_dir: crate::config::exe_dir()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// Migrate the data root to `target` (copy + verify + marker gate, with
+/// rollback on failure — see `config::switch_storage_root`). Takes effect on
+/// the next launch; the renderer prompts a restart.
+#[tauri::command]
+pub fn switch_storage_root(window: WebviewWindow, target: StorageRoot) -> Result<(), String> {
+    only_main_window(&window, "Storage location change")?;
+    crate::config::switch_storage_root(target)
 }
 
 #[tauri::command]

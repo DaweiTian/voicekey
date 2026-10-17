@@ -17,6 +17,8 @@ import type {
   OverlayState,
   RefineConnectionResult,
   RecordingStartPayload as SharedRecordingStartPayload,
+  StorageStatus,
+  StorageRootKind,
   UpdateInfo,
 } from '@/shared/types'
 import type { StoredDictationStats } from '@/lib/stats'
@@ -207,6 +209,10 @@ export const tauriApi = {
   log: (entry: LogEntryPayload) => {
     void invoke('log', { entry })
   },
+
+  // storage root (portable `<exe_dir>\data` vs default `%APPDATA%\voice-key`)
+  getStorageStatus: () => invoke<StorageStatus>('get_storage_status'),
+  switchStorageRoot: (target: StorageRootKind) => invoke<void>('switch_storage_root', { target }),
 
   // extras used by Tauri build
   showSettingsWindow: () => invoke('show_settings_window'),
