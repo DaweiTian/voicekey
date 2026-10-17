@@ -108,6 +108,9 @@ export interface CustomCompatibleLLMConfig {
   apiKey: string
 }
 
+/** 口水词清理档位：关 / 仅规则 / 随精炼（LLM）。 */
+export type FillerCleanupMode = 'off' | 'rules' | 'llm'
+
 export interface LLMRefineConfig {
   enabled: boolean
   provider: LLMProvider
@@ -122,6 +125,10 @@ export interface LLMRefineConfig {
   tokendance: TokenDanceConfig
   mimo: MimoConfig
   custom: CustomCompatibleLLMConfig
+  /** 用户词表（人名/术语）；精炼时仅在读音相近且上下文支持时纠正。 */
+  userGlossary: string[]
+  /** 口水词清理档位。 */
+  fillerCleanup: FillerCleanupMode
 }
 
 export interface TranslationConfig {

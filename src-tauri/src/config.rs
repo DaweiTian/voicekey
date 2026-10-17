@@ -191,6 +191,12 @@ pub struct LLMRefineConfig {
     pub mimo: ProviderKeyConfig,
     #[serde(default)]
     pub custom: ProviderKeyConfig,
+    /// 用户词表（人名/术语）。非敏感，与 API key 同侧持久化，但不参与脱敏。
+    #[serde(default)]
+    pub user_glossary: Vec<String>,
+    /// 口水词清理档位："off" | "rules" | "llm"。非法/缺失值按 "off"。
+    #[serde(default)]
+    pub filler_cleanup: String,
 }
 
 impl Default for LLMRefineConfig {
@@ -212,6 +218,8 @@ impl Default for LLMRefineConfig {
                 ..Default::default()
             },
             custom: ProviderKeyConfig::default(),
+            user_glossary: Vec::new(),
+            filler_cleanup: "off".into(),
         }
     }
 }
@@ -316,6 +324,45 @@ pub fn model_storage_dir() -> PathBuf {
     let dir = config_dir().join("local-asr");
     let _ = fs::create_dir_all(&dir);
     dir
+}
+
+/// invoke 边界校验用户词表：形状非法/超限报错（渲染层数据不可信），
+/// 空串与重复静默清洗。上限 100 条 × 64 字符。
+pub fn normalize_user_glossary(raw: Option<&serde_json::Value>) -> Result<Vec<String>, String> {
+    let Some(value) = raw else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .ok_or_else(|| "llmRefine.userGlossary must be an array of strings".to_string())?;
+    let mut terms: Vec<String> = Vec::new();
+    for item in items {
+        let s = item
+            .as_str()
+            .ok_or_else(|| "llmRefine.userGlossary must contain only strings".to_string())?;
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.chars().count() > 64 {
+            return Err("llmRefine.userGlossary entries must be at most 64 characters".into());
+        }
+        if !terms.iter().any(|t| t == trimmed) {
+            terms.push(trimmed.to_string());
+        }
+    }
+    if terms.len() > 100 {
+        return Err("llmRefine.userGlossary supports at most 100 entries".into());
+    }
+    Ok(terms)
+}
+
+/// 仅接受三档字面量；其余返回 `None`（调用方保留旧值）。
+pub fn normalize_filler_cleanup(raw: &str) -> Option<String> {
+    match raw {
+        "off" | "rules" | "llm" => Some(raw.to_string()),
+        _ => None,
+    }
 }
 
 pub struct ConfigStore {
@@ -565,6 +612,19 @@ impl ConfigStore {
                 next.api_key = next.custom.api_key.clone();
             }
 
+            if let Some(obj) = llm.as_object() {
+                if let Some(v) = obj.get("fillerCleanup").and_then(|v| v.as_str()) {
+                    if let Some(valid) = normalize_filler_cleanup(v) {
+                        next.filler_cleanup = valid;
+                    }
+                }
+                if let Some(v) = obj.get("userGlossary") {
+                    if !v.is_null() {
+                        next.user_glossary = normalize_user_glossary(Some(v))?;
+                    }
+                }
+            }
+
             merged.llm_refine = next;
         }
 
@@ -597,5 +657,38 @@ impl ConfigStore {
 
         self.save_unlocked(&merged)?;
         Ok(merged)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_user_glossary_trims_dedupes_and_skips_empty() {
+        let raw = serde_json::json!([" 张伟 ", "张伟", "", "芷若"]);
+        assert_eq!(
+            normalize_user_glossary(Some(&raw)).unwrap(),
+            vec!["张伟".to_string(), "芷若".to_string()]
+        );
+        assert_eq!(normalize_user_glossary(None).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn normalize_user_glossary_rejects_malformed_payloads() {
+        // 非字符串条目 / 非数组 / 单条超 64 字符 / 超 100 条：invoke 边界拒绝。
+        assert!(normalize_user_glossary(Some(&serde_json::json!([42]))).is_err());
+        assert!(normalize_user_glossary(Some(&serde_json::json!("张伟"))).is_err());
+        assert!(normalize_user_glossary(Some(&serde_json::json!(["x".repeat(65)]))).is_err());
+        let many: Vec<String> = (0..120).map(|i| format!("term{i}")).collect();
+        assert!(normalize_user_glossary(Some(&serde_json::json!(many))).is_err());
+    }
+
+    #[test]
+    fn normalize_filler_cleanup_accepts_only_known_modes() {
+        assert_eq!(normalize_filler_cleanup("off").as_deref(), Some("off"));
+        assert_eq!(normalize_filler_cleanup("rules").as_deref(), Some("rules"));
+        assert_eq!(normalize_filler_cleanup("llm").as_deref(), Some("llm"));
+        assert_eq!(normalize_filler_cleanup("drop-everything"), None);
     }
 }

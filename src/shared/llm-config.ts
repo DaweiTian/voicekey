@@ -3,6 +3,7 @@ import { normalizeRefineBaseUrl } from './refine-url'
 import type {
   CustomCompatibleLLMConfig,
   DeepSeekConfig,
+  FillerCleanupMode,
   LLMProvider,
   LLMRefineConfig,
   OpenAIConfig,
@@ -64,6 +65,8 @@ export const defaultLLMRefineConfig: LLMRefineConfig = {
   tokendance: DEFAULT_TOKENDANCE_CONFIG,
   mimo: DEFAULT_MIMO_CONFIG,
   custom: DEFAULT_CUSTOM_CONFIG,
+  userGlossary: [],
+  fillerCleanup: 'off',
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -324,6 +327,30 @@ export function resolveLLMConnection(config: LLMRefineConfig): ResolvedLLMConnec
   }
 }
 
+const FILLER_CLEANUP_MODES: readonly FillerCleanupMode[] = ['off', 'rules', 'llm']
+const MAX_GLOSSARY_TERMS = 100
+const MAX_GLOSSARY_TERM_LENGTH = 64
+
+export function normalizeUserGlossary(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const terms: string[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const trimmed = item.trim()
+    if (trimmed.length === 0 || trimmed.length > MAX_GLOSSARY_TERM_LENGTH) continue
+    if (seen.has(trimmed)) continue
+    seen.add(trimmed)
+    terms.push(trimmed)
+    if (terms.length >= MAX_GLOSSARY_TERMS) break
+  }
+  return terms
+}
+
+export function normalizeFillerCleanup(raw: unknown): FillerCleanupMode {
+  return FILLER_CLEANUP_MODES.find((mode) => mode === raw) ?? 'off'
+}
+
 export function normalizeLLMRefineConfig(config?: Partial<LLMRefineConfig>): LLMRefineConfig {
   const rawConfig =
     config && typeof config === 'object'
@@ -361,6 +388,8 @@ export function normalizeLLMRefineConfig(config?: Partial<LLMRefineConfig>): LLM
     tokendance,
     mimo,
     custom,
+    userGlossary: normalizeUserGlossary(rawConfig?.userGlossary),
+    fillerCleanup: normalizeFillerCleanup(rawConfig?.fillerCleanup),
   }
 }
 

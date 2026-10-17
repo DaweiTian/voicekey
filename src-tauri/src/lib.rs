@@ -2,12 +2,14 @@ mod asr;
 mod audio;
 mod commands;
 mod config;
+mod filler;
 mod history;
 mod hotkey;
 mod inject;
 mod llm;
 mod mouse;
 mod platform;
+mod refine_prompt;
 mod state;
 mod stats;
 mod translate;
@@ -127,7 +129,7 @@ pub fn run() {
             } else if window.label() == windowing::SESSION_WINDOW_LABEL {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     // Same rule as the overlay: never destroy the session
-                    // capsule. Convert a close into a plain hide ??and only a
+                    // capsule. Convert a close into a plain hide — and only a
                     // hide: this must NOT touch the overlay's persisted
                     // visibility flag (`hide_session` is flag-free by
                     // construction, `hide_overlay` would not be).
@@ -141,7 +143,7 @@ pub fn run() {
             app.manage(state);
 
             if let Some(main) = app.get_webview_window("main") {
-                let _ = main.set_title("???");
+                let _ = main.set_title("芷若");
             }
 
             tray::setup_tray(app.handle())?;

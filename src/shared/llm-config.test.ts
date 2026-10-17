@@ -3,7 +3,9 @@ import { LLM_PROVIDERS } from './constants'
 import {
   buildDisabledReasoningPayloadFields,
   buildLLMAttributionHeaders,
+  normalizeFillerCleanup,
   normalizeLLMRefineConfig,
+  normalizeUserGlossary,
   resolveLLMConnection,
 } from './llm-config'
 import type { LLMRefineConfig } from './types'
@@ -201,5 +203,43 @@ describe('TokenDance provider', () => {
       }),
     )
     expect(buildLLMAttributionHeaders(deepseekConnection)).toEqual({})
+  })
+})
+
+describe('normalizeUserGlossary', () => {
+  it('trims, drops blanks, and dedupes terms', () => {
+    expect(normalizeUserGlossary([' 张伟 ', '张伟', '', '   ', '芷若'])).toEqual(['张伟', '芷若'])
+  })
+
+  it('caps the list at 100 terms and drops terms over 64 chars', () => {
+    const many = Array.from({ length: 120 }, (_, i) => `term${i}`)
+    expect(normalizeUserGlossary(many)).toHaveLength(100)
+    expect(normalizeUserGlossary(['x'.repeat(65)])).toEqual([])
+    expect(normalizeUserGlossary(['ok', 42, null])).toEqual(['ok'])
+  })
+})
+
+describe('normalizeFillerCleanup', () => {
+  it('keeps known modes and falls back to off', () => {
+    expect(normalizeFillerCleanup('off')).toBe('off')
+    expect(normalizeFillerCleanup('rules')).toBe('rules')
+    expect(normalizeFillerCleanup('llm')).toBe('llm')
+    expect(normalizeFillerCleanup('bogus')).toBe('off')
+  })
+})
+
+describe('normalizeLLMRefineConfig filler/glossary defaults', () => {
+  it('defaults to off mode and empty glossary', () => {
+    const config = normalizeLLMRefineConfig({})
+    expect(config.fillerCleanup).toBe('off')
+    expect(config.userGlossary).toEqual([])
+  })
+
+  it('is idempotent for normalized input', () => {
+    const normalized = normalizeLLMRefineConfig({
+      userGlossary: ['张伟', '芷若'],
+      fillerCleanup: 'rules',
+    })
+    expect(normalizeLLMRefineConfig(normalized)).toEqual(normalized)
   })
 })
