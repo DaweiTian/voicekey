@@ -665,10 +665,14 @@ fn show_overlay_window<R: tauri::Runtime>(app: &AppHandle<R>, win: &WebviewWindo
     if already_visible {
         // Keep the capsule anchored at its persisted spot (a no-op while the
         // coordinates are unchanged) and leave its surface completely alone.
+        crate::windowing::trace(
+            "overlay show: already visible -> position+flag only (no show/harden/nudge)",
+        );
         position_overlay(app, win);
         sync_overlay_visibility_flag(app, true);
         return;
     }
+    crate::windowing::trace("overlay show: hidden -> harden+position+show+harden+nudge");
     crate::windowing::harden_overlay_window(win);
     position_overlay(app, win);
     if win.show().is_ok() {
@@ -717,6 +721,7 @@ fn overlay_hide<R: tauri::Runtime>(app: &AppHandle<R>) {
 /// `set_size` keeps the window's position (tao uses `SWP_NOMOVE`), so anchoring
 /// first and nudging second cannot move the capsule.
 fn show_session_window<R: tauri::Runtime>(app: &AppHandle<R>, win: &WebviewWindow<R>) {
+    crate::windowing::trace("session show: harden -> position -> nudge(hidden) -> show -> harden");
     crate::windowing::harden_overlay_window(win);
     // 1) anchor at the target spot, 2) clear the stale WebView2 layer while the
     // window is hidden (invisible repaint), 3) show the already-clean window.
@@ -799,7 +804,12 @@ fn session_park_position<R: tauri::Runtime>(app: &AppHandle<R>) -> PhysicalPosit
 /// renderer close into a hide.
 pub fn hide_session<R: tauri::Runtime>(app: &AppHandle<R>) {
     if let Some(win) = app.get_webview_window(crate::windowing::SESSION_WINDOW_LABEL) {
-        let _ = win.set_position(session_park_position(app));
+        let park = session_park_position(app);
+        crate::windowing::trace(&format!(
+            "session hide: park=({},{}) then hide",
+            park.x, park.y
+        ));
+        let _ = win.set_position(park);
         let _ = win.hide();
     }
 }
@@ -1238,6 +1248,7 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
 }
 
 pub fn start_session_internal<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Value, String> {
+    crate::windowing::trace("session start: entry (hotkey / middle-click / HUD tap)");
     let state = app.state::<AppState>();
     let config = state.config.load();
     // Prefer streaming capture so we always get PCM for cloud ASR.

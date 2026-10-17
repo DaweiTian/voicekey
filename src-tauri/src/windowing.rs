@@ -122,6 +122,40 @@ static OVERLAY_CREATION_LOCK: Mutex<()> = Mutex::new(());
 static SESSION_CREATION_LOCK: Mutex<()> = Mutex::new(());
 
 // ---------------------------------------------------------------------------
+// Window-operation tracing
+// ---------------------------------------------------------------------------
+
+/// Append one line to the app's `voice-key.log` - the same sink the renderer
+/// writes through `commands::log`.
+///
+/// Why not `log::info!` / `log::debug!`: the Rust `log` crate feeds
+/// `env_logger`'s **stderr** sink, which is *not* the file we receive from a
+/// user. `voice-key.log` is appended by the renderer's `log` command
+/// (`commands::log` opens the file and writes the line itself). Window-operation
+/// traces are only useful if they land in that file, so they go through this
+/// helper instead of a `log` macro.
+///
+/// Kept deliberately cheap and narrow: one short append per window lifecycle
+/// operation (a handful per session, well under 30 lines), no transcript text,
+/// no credentials, no per-frame logging. Permanent diagnostic value for every
+/// future white-flash / ghost-bar / focus report - do not remove.
+pub fn trace(message: &str) {
+    use std::io::Write;
+    let path = crate::config::log_dir().join("voice-key.log");
+    let line = format!(
+        "{} [win] {message}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Windows focus-frame hardening
 // ---------------------------------------------------------------------------
 
@@ -387,6 +421,12 @@ pub fn clear_webview_ghost_titlebar<R: tauri::Runtime>(window: &WebviewWindow<R>
         return; // a nudge is already in flight (its Resized echo is ignored)
     }
     if let Ok(size) = window.inner_size() {
+        trace(&format!(
+            "ghost-nudge label={} size={}x{}",
+            window.label(),
+            size.width,
+            size.height
+        ));
         let _ = window.set_size(tauri::PhysicalSize::new(size.width, size.height + 1));
         let _ = window.set_size(tauri::PhysicalSize::new(size.width, size.height));
     }

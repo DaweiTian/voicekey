@@ -30,6 +30,7 @@ use tauri::Manager;
 /// visible when the window is on screen, so repainting it otherwise is wasted
 /// work (and would resize a hidden window on every app activation).
 fn clear_capsule_ghost_titlebars<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    windowing::trace("ghost-sweep (focus path)");
     for label in [
         windowing::OVERLAY_WINDOW_LABEL,
         windowing::SESSION_WINDOW_LABEL,
@@ -80,7 +81,11 @@ pub fn run() {
             // and switching windows. Clear it (a guarded 1px resize) on every
             // focus change of either window, skipped while the capsule is
             // hidden - the stale bar only exists on screen.
-            if let tauri::WindowEvent::Focused(_) = event {
+            if let tauri::WindowEvent::Focused(focused) = event {
+                windowing::trace(&format!(
+                    "focused label={} focused={focused}",
+                    window.label()
+                ));
                 // Re-assert the DWM border suppression on activation: Windows 11
                 // (build 22000+) redraws its accent-color focus border the
                 // moment a window is activated unless the app re-sets
