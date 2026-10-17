@@ -32,28 +32,36 @@ fn only_main_window(window: &WebviewWindow, action: &str) -> Result<(), String> 
     }
 }
 
-fn mimo_asr_credentials(config: &AppConfig) -> (String, String, String) {
-    // Dedicated ASR credentials win; fall back to the shared MiMo LLM connection.
-    let key = if !config.asr.mimo_api_key.trim().is_empty() {
-        config.asr.mimo_api_key.clone()
+fn cloud_asr_credentials(config: &AppConfig) -> (String, String, String, asr::CloudDialect) {
+    // Dedicated cloud ASR credentials win; fall back to the shared MiMo LLM
+    // connection (kept so pre-0.5.12 MiMo configs keep working with no migration).
+    let key = if !config.asr.cloud_api_key.trim().is_empty() {
+        config.asr.cloud_api_key.clone()
     } else if !config.llm_refine.mimo.api_key.trim().is_empty() {
         config.llm_refine.mimo.api_key.clone()
     } else {
         config.llm_refine.api_key.clone()
     };
-    let base = if !config.asr.mimo_endpoint.trim().is_empty() {
-        config.asr.mimo_endpoint.clone()
+    let base = if !config.asr.cloud_endpoint.trim().is_empty() {
+        config.asr.cloud_endpoint.clone()
     } else if !config.llm_refine.mimo.endpoint.trim().is_empty() {
         config.llm_refine.mimo.endpoint.clone()
     } else {
         "https://api.xiaomimimo.com/v1".into()
     };
-    let model = if config.asr.mimo_model.trim().is_empty() {
-        "mimo-v2.5-asr".into()
+    let model = if config.asr.cloud_model.trim().is_empty() {
+        // Keep MiMo's default for the MiMo (or unset) preset so pre-0.5.12
+        // configs are unchanged; other providers must supply their own model id.
+        if config.asr.cloud_preset.is_empty() || config.asr.cloud_preset == "mimo" {
+            "mimo-v2.5-asr".into()
+        } else {
+            String::new()
+        }
     } else {
-        config.asr.mimo_model.clone()
+        config.asr.cloud_model.clone()
     };
-    (key, base, model)
+    let dialect = asr::CloudDialect::from_config(&config.asr.cloud_dialect);
+    (key, base, model, dialect)
 }
 
 /// Gap between the HUD's bottom edge and the bottom of the work area
@@ -1073,34 +1081,47 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
         (wav, duration_ms)
     };
 
-    // Transcribe with MiMo cloud ASR (the only engine since 0.5.11).
+    // Transcribe with the configured cloud ASR provider (dialect-dispatched).
     let raw_text = if wav.len() > 44 {
-        // Stream the response so the HUD can show the transcript as it grows
-        // (perceived latency); any stream failure falls back to one non-stream
-        // retry below.
-        let (api_key, base, model) = mimo_asr_credentials(&config);
+        let (api_key, base, model, dialect) = cloud_asr_credentials(&config);
         if api_key.trim().is_empty() {
-            return Err("MiMo API Key 为空，请到「设置 - 云端识别」填写。".into());
+            return Err("云端 API Key 为空，请到「设置 - 云端识别」填写。".into());
         }
-        let on_partial = {
-            let app = app.clone();
-            move |partial: &str| {
-                let _ = app.emit(
-                    "overlay-update",
-                    serde_json::json!({
-                        "status": "processing",
-                        "processingStage": "transcribing",
-                        "transcript": partial,
-                    }),
-                );
-            }
+        let call = asr::CloudCall {
+            api_key: &api_key,
+            base_url: &base,
+            model: &model,
+            language: "auto",
+            dialect,
+            instruction: asr::chat_audio_instruction(&config.asr.cloud_preset),
         };
-        match asr::transcribe_cloud_stream(&api_key, &base, &model, &wav, "auto", on_partial).await
-        {
-            Ok(text) => text,
-            Err(e) => {
-                log::warn!("streaming ASR failed ({e}), retrying non-stream");
-                asr::transcribe_cloud(&api_key, &base, &model, &wav, "auto").await?
+        match dialect {
+            // The transcriptions endpoint has no chat delta stream: non-stream only.
+            asr::CloudDialect::OpenaiTranscribe => asr::transcribe_cloud(&call, &wav).await?,
+            _ => {
+                // Stream the response so the HUD can show the transcript as it
+                // grows (perceived latency); any stream failure falls back to one
+                // non-stream retry below.
+                let on_partial = {
+                    let app = app.clone();
+                    move |partial: &str| {
+                        let _ = app.emit(
+                            "overlay-update",
+                            serde_json::json!({
+                                "status": "processing",
+                                "processingStage": "transcribing",
+                                "transcript": partial,
+                            }),
+                        );
+                    }
+                };
+                match asr::transcribe_cloud_stream(&call, &wav, on_partial).await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        log::warn!("streaming ASR failed ({e}), retrying non-stream");
+                        asr::transcribe_cloud(&call, &wav).await?
+                    }
+                }
             }
         }
     } else {
@@ -1135,11 +1156,19 @@ async fn stop_session_inner<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Str
         // If the recorder sent wav/webm chunks, try cloud ASR on the first non-empty one
         // after wrapping wav or using raw if already wav.
         let audio = chunks;
-        let (api_key, base, model) = mimo_asr_credentials(&config);
+        let (api_key, base, model, dialect) = cloud_asr_credentials(&config);
         if api_key.trim().is_empty() {
-            return Err("MiMo API Key 为空，请到「设置 - 云端识别」填写。".into());
+            return Err("云端 API Key 为空，请到「设置 - 云端识别」填写。".into());
         }
-        asr::transcribe_cloud(&api_key, &base, &model, &audio, "auto").await?
+        let call = asr::CloudCall {
+            api_key: &api_key,
+            base_url: &base,
+            model: &model,
+            language: "auto",
+            dialect,
+            instruction: asr::chat_audio_instruction(&config.asr.cloud_preset),
+        };
+        asr::transcribe_cloud(&call, &audio).await?
     };
 
     // 规则档口水词清理作用在 ASR 直出文本上，先于 refine/translate，

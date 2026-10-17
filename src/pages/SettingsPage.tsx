@@ -13,6 +13,7 @@ import {
   Info,
   Plug,
   RefreshCw,
+  Cloud,
   Languages,
   Monitor,
   KeyRound,
@@ -35,6 +36,12 @@ import {
 } from '@/shared/constants'
 import { normalizeRefineBaseUrl } from '@/shared/refine-url'
 import {
+  CLOUD_ASR_DIALECTS,
+  CLOUD_ASR_PRESETS,
+  applyCloudAsrPreset,
+  getCloudAsrPreset,
+} from '@/shared/cloud-asr'
+import {
   defaultLLMRefineConfig,
   normalizeFillerCleanup,
   normalizeLLMRefineConfig,
@@ -43,6 +50,7 @@ import {
 } from '@/shared/llm-config'
 import type {
   AppConfig,
+  CloudDialect,
   ConfigSecretRequest,
   FillerCleanupMode,
   LLMRefineConfig,
@@ -119,11 +127,14 @@ function isAsrConfigDirty(current: AppConfig['asr'], original: AppConfig['asr'])
     (current.lowVolumeMode ?? true) !== (original.lowVolumeMode ?? true) ||
     (current.microphoneDeviceId ?? '') !== (original.microphoneDeviceId ?? '') ||
     (current.microphoneDeviceLabel ?? '') !== (original.microphoneDeviceLabel ?? '') ||
-    (current.mimoEndpoint ?? '') !== (original.mimoEndpoint ?? '') ||
-    (current.mimoModel ?? '') !== (original.mimoModel ?? '') ||
+    (current.cloudPreset ?? 'mimo') !== (original.cloudPreset ?? 'mimo') ||
+    (current.cloudDialect ?? 'chat_asr_data_url') !==
+      (original.cloudDialect ?? 'chat_asr_data_url') ||
+    (current.cloudEndpoint ?? '') !== (original.cloudEndpoint ?? '') ||
+    (current.cloudModel ?? '') !== (original.cloudModel ?? '') ||
     // A stored key is masked as the placeholder in both snapshots, so equal placeholders mean the
     // key was left untouched; any other difference (including clearing or a new key) is a change.
-    (current.mimoApiKey ?? '') !== (original.mimoApiKey ?? '')
+    (current.cloudApiKey ?? '') !== (original.cloudApiKey ?? '')
   )
 }
 
@@ -1568,16 +1579,23 @@ export default function SettingsPage() {
     }
   }
 
-  // MiMo cloud ASR is the only engine: readiness mirrors the credential
-  // fallback chain the Rust side uses (`mimo_asr_credentials`).
+  // Cloud ASR readiness mirrors the credential fallback chain the Rust side
+  // uses (`cloud_asr_credentials`).
   const asrHealthReady = Boolean(
-    (config.asr.mimoApiKey ?? '').trim() ||
+    (config.asr.cloudApiKey ?? '').trim() ||
     config.llmRefine.mimo.apiKey.trim() ||
     config.llmRefine.apiKey.trim(),
   )
   const asrHealthStatus = asrHealthReady
     ? t('settings.health.asrCloudReady')
     : t('settings.health.asrCloudMissing')
+
+  const cloudPreset = config.asr.cloudPreset || 'mimo'
+  const cloudDialect = config.asr.cloudDialect || 'chat_asr_data_url'
+  const cloudModelPlaceholder = getCloudAsrPreset(cloudPreset).modelPlaceholder
+  const cloudDialectHelpKey =
+    CLOUD_ASR_DIALECTS.find((entry) => entry.id === cloudDialect)?.helpKey ??
+    'settings.cloudDialectDataUrlHelp'
 
   const translationActive = config.translation.enabled || translateOutput
   const activeTargetLanguage = TARGET_LANGUAGES.find(
@@ -1762,70 +1780,96 @@ export default function SettingsPage() {
 
             <div className="mt-4 space-y-3">
               <div className="space-y-4 rounded-lg border border-border/60 p-3">
+                <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.05em] text-muted-foreground">
+                  <Cloud className="h-3.5 w-3.5" />
+                  {t('settings.cloudAsrTitle')}
+                </p>
                 <div className="space-y-2">
-                  <Label htmlFor="asrMimoEndpoint">
-                    {t('settings.refineEndpoint')} <span className="text-primary">*</span>
+                  <Label htmlFor="cloudPreset">{t('settings.cloudPresetLabel')}</Label>
+                  <Select
+                    value={cloudPreset}
+                    onValueChange={(presetId) =>
+                      setConfig((prev) => ({
+                        ...prev,
+                        asr: applyCloudAsrPreset(prev.asr, presetId),
+                      }))
+                    }
+                  >
+                    <SelectTrigger id="cloudPreset" className="no-drag cursor-pointer">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CLOUD_ASR_PRESETS.map((preset) => (
+                        <SelectItem key={preset.id} value={preset.id}>
+                          {t(preset.labelKey)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">{t('settings.cloudPresetHelp')}</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="asrCloudEndpoint">
+                    {t('settings.cloudEndpointLabel')} <span className="text-primary">*</span>
                   </Label>
                   <Input
-                    id="asrMimoEndpoint"
+                    id="asrCloudEndpoint"
                     type="text"
-                    value={config.asr.mimoEndpoint ?? ''}
+                    value={config.asr.cloudEndpoint ?? ''}
                     onChange={(e) =>
                       setConfig((prev) => ({
                         ...prev,
-                        asr: { ...prev.asr, mimoEndpoint: e.target.value },
+                        asr: { ...prev.asr, cloudEndpoint: e.target.value },
                       }))
                     }
                     placeholder="https://api.xiaomimimo.com/v1"
                     className="no-drag font-mono"
                   />
-                  <p className="text-xs text-muted-foreground">
-                    {t('settings.asrMimoEndpointHelp')}
-                  </p>
+                  <p className="text-xs text-muted-foreground">{t('settings.cloudEndpointHelp')}</p>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="asrMimoModel">{t('settings.refineModel')}</Label>
+                  <Label htmlFor="asrCloudModel">{t('settings.cloudModelLabel')}</Label>
                   <Input
-                    id="asrMimoModel"
+                    id="asrCloudModel"
                     type="text"
-                    value={config.asr.mimoModel ?? 'mimo-v2.5-asr'}
+                    value={config.asr.cloudModel ?? ''}
                     onChange={(e) =>
                       setConfig((prev) => ({
                         ...prev,
-                        asr: { ...prev.asr, mimoModel: e.target.value },
+                        asr: { ...prev.asr, cloudModel: e.target.value },
                       }))
                     }
-                    placeholder="mimo-v2.5-asr"
+                    placeholder={cloudModelPlaceholder}
                     className="no-drag font-mono"
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="asrMimoApiKey">
-                    {t('settings.refineApiKey')} <span className="text-primary">*</span>
+                  <Label htmlFor="asrCloudApiKey">
+                    {t('settings.cloudApiKeyLabel')} <span className="text-primary">*</span>
                   </Label>
                   <div className="relative">
                     <Input
-                      id="asrMimoApiKey"
+                      id="asrCloudApiKey"
                       type={visibleSecret?.id === 'asr:mimo' ? 'text' : 'password'}
                       value={
                         visibleSecret?.id === 'asr:mimo'
-                          ? (visibleSecret.value ?? config.asr.mimoApiKey ?? '')
-                          : (config.asr.mimoApiKey ?? '')
+                          ? (visibleSecret.value ?? config.asr.cloudApiKey ?? '')
+                          : (config.asr.cloudApiKey ?? '')
                       }
                       onChange={(e) => {
                         const nextValue = stripStoredSecretPlaceholder(
                           e.target.value,
-                          config.asr.mimoApiKey ?? '',
+                          config.asr.cloudApiKey ?? '',
                         )
                         setVisibleSecret((current) =>
                           current?.id === 'asr:mimo' ? { id: current.id } : current,
                         )
                         setConfig((prev) => ({
                           ...prev,
-                          asr: { ...prev.asr, mimoApiKey: nextValue },
+                          asr: { ...prev.asr, cloudApiKey: nextValue },
                         }))
                       }}
-                      placeholder={t('settings.asrMimoApiKeyPlaceholder')}
+                      placeholder={t('settings.cloudApiKeyPlaceholder')}
                       className="no-drag pr-10 font-mono"
                     />
                     <button
@@ -1834,7 +1878,7 @@ export default function SettingsPage() {
                         void handleSecretVisibilityToggle(
                           { scope: 'asr', provider: 'mimo' },
                           'asr:mimo',
-                          config.asr.mimoApiKey ?? '',
+                          config.asr.cloudApiKey ?? '',
                         )
                       }
                       disabled={revealingSecretId === 'asr:mimo'}
@@ -1848,8 +1892,34 @@ export default function SettingsPage() {
                       )}
                     </button>
                   </div>
-                  <p className="text-xs text-muted-foreground">{t('settings.asrMimoApiKeyHelp')}</p>
+                  <p className="text-xs text-muted-foreground">{t('settings.cloudApiKeyHelp')}</p>
                 </div>
+                {cloudPreset === 'custom' ? (
+                  <div className="space-y-2">
+                    <Label htmlFor="cloudDialect">{t('settings.cloudDialectLabel')}</Label>
+                    <Select
+                      value={cloudDialect}
+                      onValueChange={(dialect) =>
+                        setConfig((prev) => ({
+                          ...prev,
+                          asr: { ...prev.asr, cloudDialect: dialect as CloudDialect },
+                        }))
+                      }
+                    >
+                      <SelectTrigger id="cloudDialect" className="no-drag cursor-pointer">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {CLOUD_ASR_DIALECTS.map((dialect) => (
+                          <SelectItem key={dialect.id} value={dialect.id}>
+                            {t(dialect.labelKey)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">{t(cloudDialectHelpKey)}</p>
+                  </div>
+                ) : null}
               </div>
             </div>
 

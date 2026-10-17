@@ -41,8 +41,8 @@ Zhiruo turns speech into text without changing the way you work. It stays in the
 starts recording only while you hold the push-to-talk key, and pastes the final text wherever your
 cursor is active.
 
-- **Cloud transcription** — audio is transcribed by MiMo (`mimo-v2.5-asr`) through an
-  OpenAI-compatible endpoint; add your own API key in Settings.
+- **Bring-your-own cloud ASR** — plug in any OpenAI-compatible provider (MiMo, Qwen/DashScope,
+  Doubao Ark, OpenAI) with your own Base URL, model, and API key.
 - **Streaming output** — the transcript appears in the HUD as the model generates it, with
   model-native punctuation.
 - **Optional text cleanup** — connect OpenAI, DeepSeek, OpenRouter, or a custom OpenAI-compatible
@@ -62,7 +62,7 @@ Hold the PTT hotkey
         ↓
 Capture microphone audio
         ↓
-Run MiMo cloud speech recognition
+Transcribe with your cloud ASR provider
         ↓
 Optionally refine or translate the final text with your LLM provider
         ↓
@@ -74,12 +74,32 @@ injection. Speech recognition runs in the cloud, so no model inference blocks th
 
 ### Recognition
 
-Transcription uses MiMo cloud ASR (`mimo-v2.5-asr`) over an OpenAI-compatible `chat/completions`
-endpoint. Configure the endpoint, model, and API key under **Settings → Speech Recognition**; when
-the endpoint is left empty it falls back to the MiMo connection configured for text refinement.
-Responses are streamed so partial text shows in the HUD while the model is still generating, and a
-non-streaming call is used as a fallback. Earlier releases offered downloadable on-device models
+Transcription talks to a cloud ASR endpoint you configure under
+**Settings → Speech Recognition**. Pick a provider preset (or choose **Custom**) and fill in a
+Base URL, model, and API key; the request shape is chosen automatically from the provider's
+_dialect_. Responses stream so partial text shows in the HUD while the model is still generating,
+with a non-streaming call as a fallback. When the endpoint is left empty it falls back to the MiMo
+connection configured for text refinement. Earlier releases offered downloadable on-device models
 (SenseVoice / X-ASR); that local path was removed in 0.5.11.
+
+| Preset           | Base URL                                            | Dialect           |
+| ---------------- | --------------------------------------------------- | ----------------- |
+| MiMo (default)   | `https://api.xiaomimimo.com/v1`                     | chat_asr_data_url |
+| Qwen (DashScope) | `https://dashscope.aliyuncs.com/compatible-mode/v1` | chat_asr_data_url |
+| Doubao (Ark)     | `https://ark.cn-beijing.volces.com/api/v3`          | chat_openai_audio |
+| Generic OpenAI   | `https://api.openai.com/v1`                         | chat_openai_audio |
+
+The three request dialects (selectable only for **Custom**) are:
+
+- `chat_asr_data_url` — a `data:` URL in `input_audio.data` with the language in a top-level
+  `asr_options`. MiMo (`mimo-v2.5-asr`) and Qwen3-ASR-Flash.
+- `chat_openai_audio` — raw base64 plus `format:"wav"` and a transcription instruction. OpenAI
+  audio-chat models and Doubao Ark audio-understanding models (Ark needs a model from your console).
+- `openai_transcribe` — multipart `POST {base}/audio/transcriptions`, non-streaming. OpenAI and
+  compatible gateways only.
+
+Doubao's dedicated speech endpoint (openspeech flash, independent `X-Api-*` auth) is not wired up
+yet.
 
 ## Installation
 
@@ -96,7 +116,8 @@ Download the latest build from
 ### First run
 
 1. Open **Settings** and select a microphone.
-2. Enter your MiMo ASR API key (or reuse the MiMo key configured for text refinement).
+2. Configure your cloud ASR provider — pick a preset or a custom Base URL, model, and API key
+   (or reuse the MiMo key configured for text refinement).
 3. Optionally configure an LLM provider for transcript cleanup and translation.
 4. Focus any text field, hold the push-to-talk hotkey, speak, and release to insert the result.
 
@@ -164,7 +185,7 @@ running the supported Hyprland integration path.
 Speech recognition, transcript cleanup, and translation call configured cloud endpoints; nothing is
 inferred on your device. Each has an explicit scope:
 
-- **Speech recognition** uploads the recorded audio to the configured MiMo ASR endpoint and returns
+- **Speech recognition** uploads the recorded audio to the configured cloud ASR endpoint and returns
   the transcript.
 - **Transcript cleanup** sends the final recognized text—not the raw audio—to the configured LLM
   provider.

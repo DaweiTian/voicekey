@@ -148,28 +148,28 @@ describe('settings persisted secret state', () => {
     expect(result.llmRefine.openai.apiKey).toBe(STORED_SECRET_PLACEHOLDER)
   })
 
-  it('masks a saved MiMo ASR key when the renderer value still matches what was sent', () => {
+  it('masks a saved cloud ASR key when the renderer value still matches what was sent', () => {
     const current = createConfig('')
-    current.asr.mimoApiKey = 'asr-key'
+    current.asr.cloudApiKey = 'asr-key'
     const persisted = createConfig('')
-    persisted.asr.mimoApiKey = STORED_SECRET_PLACEHOLDER
+    persisted.asr.cloudApiKey = STORED_SECRET_PLACEHOLDER
 
     const result = applyPersistedSecretState(current, { asr: current.asr }, persisted)
 
-    expect(result.asr.mimoApiKey).toBe(STORED_SECRET_PLACEHOLDER)
+    expect(result.asr.cloudApiKey).toBe(STORED_SECRET_PLACEHOLDER)
   })
 
-  it('keeps a MiMo ASR key edited again while the save was in flight', () => {
+  it('keeps a cloud ASR key edited again while the save was in flight', () => {
     const saved = createConfig('')
-    saved.asr.mimoApiKey = 'first-asr-key'
+    saved.asr.cloudApiKey = 'first-asr-key'
     const current = createConfig('')
-    current.asr.mimoApiKey = 'second-asr-key'
+    current.asr.cloudApiKey = 'second-asr-key'
     const persisted = createConfig('')
-    persisted.asr.mimoApiKey = STORED_SECRET_PLACEHOLDER
+    persisted.asr.cloudApiKey = STORED_SECRET_PLACEHOLDER
 
     const result = applyPersistedSecretState(current, { asr: saved.asr }, persisted)
 
-    expect(result.asr.mimoApiKey).toBe('second-asr-key')
+    expect(result.asr.cloudApiKey).toBe('second-asr-key')
   })
 })
 

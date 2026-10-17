@@ -13,16 +13,23 @@ export interface VoiceSession {
 
 export type ASRMode = 'classic' | 'streaming'
 
+/** Wire format for a cloud ASR request (mirrors the Rust `CloudDialect`). */
+export type CloudDialect = 'chat_asr_data_url' | 'chat_openai_audio' | 'openai_transcribe'
+
 export interface ASRConfig {
   lowVolumeMode?: boolean
   microphoneDeviceId?: string
   microphoneDeviceLabel?: string
-  /** MiMo ASR endpoint (optional; falls back to LLM MiMo endpoint). */
-  mimoEndpoint?: string
-  /** MiMo ASR API key (optional; falls back to LLM MiMo key). */
-  mimoApiKey?: string
-  /** MiMo ASR model id, default `mimo-v2.5-asr`. */
-  mimoModel?: string
+  /** Cloud ASR endpoint (optional; falls back to the LLM MiMo endpoint). */
+  cloudEndpoint?: string
+  /** Cloud ASR API key (optional; falls back to the LLM MiMo key). */
+  cloudApiKey?: string
+  /** Cloud ASR model id, default `mimo-v2.5-asr`. */
+  cloudModel?: string
+  /** Selected provider preset id: `mimo` | `qwen` | `doubao_ark` | `openai` | `custom`. */
+  cloudPreset?: string
+  /** Request dialect; drives the payload shape (see {@link CloudDialect}). */
+  cloudDialect?: CloudDialect
 }
 
 export type LLMProvider =

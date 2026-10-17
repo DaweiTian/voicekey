@@ -339,10 +339,12 @@ Rust 主进程（Tauri v2）。app 入口 `main.rs` → `lib.rs::run()`：初始
   load → mutate → save 全程持进程级 `CONFIG_LOCK`（与 `stats.rs` 的 `STATS_LOCK`
   同款），读也持锁防半截文件；overlay 重建工作线程、托盘/主线程、IPC 线程并发
   写不丢更新。锁内只做文件 I/O 与纯 JSON 合并、不嵌套其他锁（无锁序死锁风险）。
-- `src/asr.rs` - 云端识别（MiMo，OpenAI 兼容 `mimo-v2.5-asr`）：非流式
-  `transcribe_cloud` + SSE 流式 `transcribe_cloud_stream`（HUD 边生成边显示），以及
-  audio 管线共用的 WAV 编码 `encode_wav_mono_f32`。**0.5.11 起本地识别（SenseVoice /
-  X-ASR）与模型下载/管理全部移除**，云端是唯一引擎。
+- `src/asr.rs` - 通用云端识别：按 `CloudDialect` 分叉请求载荷——`chat_asr_data_url`
+  （MiMo / 千问：`input_audio.data` 传 data URL + 顶层 `asr_options`，与 0.5.11 载荷逐字节
+  一致）、`chat_openai_audio`（OpenAI / 豆包 Ark：纯 base64 + `format:"wav"` + 转写指令
+  part）、`openai_transcribe`（multipart `{base}/audio/transcriptions`，非流式）。流式
+  `transcribe_cloud_stream`（SSE，HUD 边生成边显示）+ 非流式 `transcribe_cloud` 回退；audio
+  管线共用 WAV 编码 `encode_wav_mono_f32`。本地识别（SenseVoice / X-ASR）已在 0.5.11 移除。
 - `src/audio.rs` / `src/inject.rs` / `src/llm.rs` /
   `src/history.rs` / `src/platform.rs` / `src/state.rs` /
   `src/updater.rs` - 各子系统实现（详见各自文件头注释）。`audio.rs` 另含

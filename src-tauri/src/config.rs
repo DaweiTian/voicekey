@@ -104,19 +104,37 @@ pub struct ASRConfig {
     pub microphone_device_id: String,
     #[serde(default)]
     pub microphone_device_label: String,
-    /// MiMo ASR endpoint. Empty means fall back to LLM MiMo endpoint / default.
-    #[serde(default)]
-    pub mimo_endpoint: String,
-    /// MiMo ASR API key. Empty means fall back to LLM MiMo API key.
-    #[serde(default)]
-    pub mimo_api_key: String,
-    /// MiMo ASR model id.
-    #[serde(default = "default_mimo_asr_model")]
-    pub mimo_model: String,
+    /// Cloud ASR endpoint (OpenAI-compatible base URL). Empty means fall back to
+    /// the LLM MiMo endpoint / built-in default. `mimoEndpoint` is the
+    /// pre-0.5.12 key, kept as a serde alias so existing configs load unchanged.
+    #[serde(default, alias = "mimoEndpoint")]
+    pub cloud_endpoint: String,
+    /// Cloud ASR API key. Empty means fall back to the LLM MiMo API key.
+    /// `mimoApiKey` is the pre-0.5.12 key.
+    #[serde(default, alias = "mimoApiKey")]
+    pub cloud_api_key: String,
+    /// Cloud ASR model id (defaults to MiMo's). `mimoModel` is the pre-0.5.12 key.
+    #[serde(default = "default_cloud_asr_model", alias = "mimoModel")]
+    pub cloud_model: String,
+    /// Selected provider preset id (`mimo` | `qwen` | `doubao_ark` | `openai` |
+    /// `custom`). A UI hint only — the actual request is driven by `cloud_dialect`.
+    #[serde(default = "default_cloud_preset")]
+    pub cloud_preset: String,
+    /// Request dialect: `chat_asr_data_url` | `chat_openai_audio` | `openai_transcribe`.
+    #[serde(default = "default_cloud_dialect")]
+    pub cloud_dialect: String,
 }
 
-fn default_mimo_asr_model() -> String {
+fn default_cloud_asr_model() -> String {
     "mimo-v2.5-asr".into()
+}
+
+fn default_cloud_preset() -> String {
+    "mimo".into()
+}
+
+fn default_cloud_dialect() -> String {
+    "chat_asr_data_url".into()
 }
 
 fn default_true() -> bool {
@@ -129,9 +147,11 @@ impl Default for ASRConfig {
             low_volume_mode: true,
             microphone_device_id: String::new(),
             microphone_device_label: String::new(),
-            mimo_endpoint: String::new(),
-            mimo_api_key: String::new(),
-            mimo_model: default_mimo_asr_model(),
+            cloud_endpoint: String::new(),
+            cloud_api_key: String::new(),
+            cloud_model: default_cloud_asr_model(),
+            cloud_preset: default_cloud_preset(),
+            cloud_dialect: default_cloud_dialect(),
         }
     }
 }
@@ -397,7 +417,7 @@ impl ConfigStore {
                 STORED_SECRET_PLACEHOLDER.to_string()
             }
         };
-        config.asr.mimo_api_key = mask(&config.asr.mimo_api_key);
+        config.asr.cloud_api_key = mask(&config.asr.cloud_api_key);
         config.llm_refine.api_key = mask(&config.llm_refine.api_key);
         config.llm_refine.openai.api_key = mask(&config.llm_refine.openai.api_key);
         config.llm_refine.deepseek.api_key = mask(&config.llm_refine.deepseek.api_key);
@@ -417,7 +437,9 @@ impl ConfigStore {
             ("llm-refine", "tokendance") => Ok(config.llm_refine.tokendance.api_key),
             ("llm-refine", "mimo") => Ok(config.llm_refine.mimo.api_key),
             ("llm-refine", "custom-compatible") => Ok(config.llm_refine.custom.api_key),
-            ("asr", "mimo") => Ok(config.asr.mimo_api_key),
+            // The ASR scope keeps the legacy `mimo` provider id (internal
+            // identifier only; the request is generic cloud ASR).
+            ("asr", "mimo") => Ok(config.asr.cloud_api_key),
             _ => Err("Invalid saved API key request".into()),
         }
     }
@@ -496,22 +518,44 @@ impl ConfigStore {
                 if let Some(v) = obj.get("microphoneDeviceLabel").and_then(|v| v.as_str()) {
                     merged.asr.microphone_device_label = v.chars().take(128).collect();
                 }
-                if let Some(v) = obj.get("mimoEndpoint").and_then(|v| v.as_str()) {
-                    merged.asr.mimo_endpoint = v.chars().take(512).collect();
+                if let Some(v) = obj
+                    .get("cloudEndpoint")
+                    .or_else(|| obj.get("mimoEndpoint"))
+                    .and_then(|v| v.as_str())
+                {
+                    merged.asr.cloud_endpoint = v.chars().take(512).collect();
                 }
-                if let Some(v) = obj.get("mimoApiKey").and_then(|v| v.as_str()) {
+                if let Some(v) = obj
+                    .get("cloudApiKey")
+                    .or_else(|| obj.get("mimoApiKey"))
+                    .and_then(|v| v.as_str())
+                {
                     if v == STORED_SECRET_PLACEHOLDER {
                         // keep stored value
                     } else {
-                        merged.asr.mimo_api_key = v.to_string();
+                        merged.asr.cloud_api_key = v.to_string();
                     }
                 }
-                if let Some(v) = obj.get("mimoModel").and_then(|v| v.as_str()) {
-                    merged.asr.mimo_model = if v.trim().is_empty() {
-                        default_mimo_asr_model()
-                    } else {
-                        v.chars().take(128).collect()
-                    };
+                if let Some(v) = obj
+                    .get("cloudModel")
+                    .or_else(|| obj.get("mimoModel"))
+                    .and_then(|v| v.as_str())
+                {
+                    // Store as-is (capped). The MiMo default is applied at request
+                    // time for the MiMo preset, so a non-MiMo preset left with an
+                    // empty model is not silently rewritten to `mimo-v2.5-asr`.
+                    merged.asr.cloud_model = v.chars().take(128).collect();
+                }
+                if let Some(v) = obj.get("cloudPreset").and_then(|v| v.as_str()) {
+                    merged.asr.cloud_preset = v.chars().take(32).collect();
+                }
+                if let Some(v) = obj.get("cloudDialect").and_then(|v| v.as_str()) {
+                    if matches!(
+                        v,
+                        "chat_asr_data_url" | "chat_openai_audio" | "openai_transcribe"
+                    ) {
+                        merged.asr.cloud_dialect = v.to_string();
+                    }
                 }
             }
         }

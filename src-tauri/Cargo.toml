@@ -1,6 +1,6 @@
 [package]
 name = "voice-key"
-version = "0.5.11"
+version = "0.5.12"
 description = "Privacy-first push-to-talk voice input for Windows, macOS, and Linux"
 authors = ["BuildWithAIs"]
 edition = "2021"
@@ -29,7 +29,7 @@ anyhow = "1"
 dirs = "6"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
 sha2 = "0.10"
 hex = "0.4"

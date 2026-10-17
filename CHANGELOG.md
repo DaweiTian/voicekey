@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.5.12](https://github.com/BuildWithAIs/voicekey/compare/v0.5.11...v0.5.12) (2026-10-17)
+
+### Features
+
+- **asr:** 云端识别通用化——不再绑死 MiMo，设置页新增**服务商预设 + Base URL + API Key + 模型**，可接任意 OpenAI 兼容云 ASR。新增 `CloudDialect` 三种请求方言：`chat_asr_data_url`（MiMo / 千问：`input_audio.data` 传 data URL + 顶层 `asr_options`，与 0.5.11 载荷**逐字节一致**）、`chat_openai_audio`（OpenAI / 豆包 Ark：纯 base64 + `format:"wav"` + 转写指令 part，豆包用中文指令）、`openai_transcribe`（multipart `{base}/audio/transcriptions`，非流式）。预设四个（MiMo / 千问 DashScope / 豆包 Ark / 通用 OpenAI）+ 自定义（自选方言）；选择预设即回填 endpoint + 方言 + 示例模型，API Key 始终手填
+- **asr:** 配置键通用化且**无迁移**——`mimoEndpoint/mimoApiKey/mimoModel` 重命名为 `cloudEndpoint/cloudApiKey/cloudModel` 并加 `mimo*` serde 别名，旧配置（含真实 key）读入零迁移、下次保存自然写新键；新增 `cloudPreset`（默认 `mimo`）与 `cloudDialect`（默认 `chat_asr_data_url`）。MiMo 默认路径行为零回归
+- **asr:** `reqwest` 启用 `multipart` feature（`/audio/transcriptions` 方言所需）
+
+### Notes
+
+- SSE 流式管线 `ingest_sse_line` 四家 chat 路线全兼容，未改动；7MB 护栏与 16k 单声道 WAV 维持
+- 豆包语音专用 flash 端点（openspeech，独立 `X-Api-*` 鉴权 + 头部状态码）排 v1.1，不在本轮范围
+
 ## [0.5.11](https://github.com/BuildWithAIs/voicekey/compare/v0.5.10...v0.5.11) (2026-10-17)
 
 ### ⚠ BREAKING CHANGES

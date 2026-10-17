@@ -1,4 +1,5 @@
 import { LLM_REFINE, TRANSLATION } from '@/shared/constants'
+import { DEFAULT_CLOUD_DIALECT, DEFAULT_CLOUD_PRESET } from '@/shared/cloud-asr'
 import { normalizeLLMRefineConfig, resolveLLMConnection } from '@/shared/llm-config'
 import type { AppConfig, LLMRefineConfig } from '@/shared/types'
 
@@ -178,6 +179,8 @@ export function normalizeRendererConfig(loadedConfig: AppConfig): AppConfig {
       lowVolumeMode: loadedConfig.asr?.lowVolumeMode ?? true,
       microphoneDeviceId: loadedConfig.asr?.microphoneDeviceId ?? '',
       microphoneDeviceLabel: loadedConfig.asr?.microphoneDeviceLabel ?? '',
+      cloudPreset: loadedConfig.asr?.cloudPreset || DEFAULT_CLOUD_PRESET,
+      cloudDialect: loadedConfig.asr?.cloudDialect || DEFAULT_CLOUD_DIALECT,
     },
     llmRefine: normalizeLLMRefineConfig(loadedConfig.llmRefine),
     translation: {
@@ -221,13 +224,13 @@ export function applyPersistedSecretState(
     llmRefine = normalizeLLMRefineConfig(nextLLMRefine)
   }
 
-  // Mirror the masked state of the MiMo ASR key only when the renderer value still matches what
+  // Mirror the masked state of the cloud ASR key only when the renderer value still matches what
   // was sent, so edits made while the save was in flight are never overwritten.
   let asr = currentConfig.asr
   if (savedPatch.asr) {
-    const savedMimoApiKey = savedPatch.asr.mimoApiKey ?? ''
-    if ((currentConfig.asr?.mimoApiKey ?? '') === savedMimoApiKey) {
-      asr = { ...currentConfig.asr, mimoApiKey: persistedConfig.asr?.mimoApiKey ?? '' }
+    const savedCloudApiKey = savedPatch.asr.cloudApiKey ?? ''
+    if ((currentConfig.asr?.cloudApiKey ?? '') === savedCloudApiKey) {
+      asr = { ...currentConfig.asr, cloudApiKey: persistedConfig.asr?.cloudApiKey ?? '' }
     }
   }
 
